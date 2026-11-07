@@ -9,6 +9,7 @@ import '../render/notes.dart' show fmt;
 import '../state/app_state.dart';
 import 'admin_screen.dart';
 import 'dialogs.dart';
+import 'import_dialog.dart';
 import 'profile_screen.dart';
 import 'results_view.dart';
 import 'theme.dart';
@@ -115,7 +116,7 @@ class _TopBar extends StatelessWidget {
           Text(u.email, style: const TextStyle(color: Color(0xFF9FB0C3), fontSize: 11)),
           btn('我的资料 Profile', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => ProfileScreen(state: state)))),
           if (u.isAdmin) btn('管理后台 Admin', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => AdminScreen(state: state)))),
-          btn('登出 Logout', () => state.logout(message: '已登出 Logged out')),
+          btn('登出 Logout', () => state.logout(message: '已登出 Logged out', clearDraft: true)),
         ]),
       ]),
     );
@@ -217,7 +218,10 @@ class _ItemsCard extends StatelessWidget {
       step: 1,
       title: '物品清单 Item List',
       hint: '输入总数量与每箱数量，系统自动换算箱数 — Enter total PCS & PCS/box, boxes are auto-calculated',
-      trailing: TextButton.icon(key: const ValueKey('loadSample'), onPressed: state.loadSample, icon: const Icon(Icons.auto_awesome, size: 16, color: orangeDark), label: const Text('试用示例 Try Sample', style: TextStyle(color: orangeDark, fontSize: 12))),
+      trailing: Wrap(spacing: 4, children: [
+        TextButton.icon(key: const ValueKey('importList'), onPressed: () => showImportDialog(context, state), icon: const Icon(Icons.content_paste, size: 16, color: orangeDark), label: const Text('从 Excel 汇入 Import', style: TextStyle(color: orangeDark, fontSize: 12))),
+        TextButton.icon(key: const ValueKey('loadSample'), onPressed: state.loadSample, icon: const Icon(Icons.auto_awesome, size: 16, color: orangeDark), label: const Text('试用示例 Try Sample', style: TextStyle(color: orangeDark, fontSize: 12))),
+      ]),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         LayoutBuilder(builder: (context, box) {
           // 手机: 每样物品一张卡片, 不用左右滑表格

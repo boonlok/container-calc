@@ -8,6 +8,7 @@ import 'package:container_calc/state/app_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 Future<void> _loadFont() async {
   final bytes = File('assets/fonts/NotoSansSC-subset.ttf').readAsBytesSync();
@@ -16,6 +17,9 @@ Future<void> _loadFont() async {
 }
 
 void main() {
+  // 草稿保存用到本机储存: 测试里换成内存版, 否则会一直等平台回应
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
   testWidgets('register → calculate → close-ups → history → logout clears data', (tester) async {
     await _loadFont();
     tester.view.physicalSize = const Size(1500, 1400);

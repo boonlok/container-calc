@@ -56,3 +56,28 @@ Future<bool> copyToClipboard(String text) async {
     return false;
   }
 }
+
+Future<Uint8List?> pickTextFile() {
+  final done = Completer<Uint8List?>();
+  final input = web.HTMLInputElement()
+    ..type = 'file'
+    ..accept = '.csv,.txt,.tsv,text/csv,text/plain';
+  input.onchange = ((web.Event _) {
+    final file = input.files?.item(0);
+    if (file == null) {
+      done.complete(null);
+      return;
+    }
+    file.arrayBuffer().toDart.then((buf) => done.complete(buf.toDart.asUint8List()), onError: (_) => done.complete(null));
+  }).toJS;
+  input.click();
+  return done.future;
+}
+
+/// 页面被隐藏 (切到别的分页、关掉、重新整理) 时呼叫: 用来自动保存草稿
+void onPageHide(void Function() callback) {
+  web.document.addEventListener('visibilitychange', ((web.Event _) {
+    if (web.document.visibilityState == 'hidden') callback();
+  }).toJS);
+  web.window.addEventListener('pagehide', ((web.Event _) => callback()).toJS);
+}

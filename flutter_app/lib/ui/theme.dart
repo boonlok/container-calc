@@ -73,7 +73,7 @@ class SectionCard extends StatelessWidget {
                 if (hint != null) Padding(padding: const EdgeInsets.only(top: 1), child: Text(hint!, style: const TextStyle(fontSize: 11.5, color: textSecondary))),
               ]),
             ),
-            ?trailing,
+            if (trailing != null) Flexible(child: trailing!), // 手机上窄时会自动换行, 不超出画面
           ]),
           const SizedBox(height: 14),
           Material(type: MaterialType.transparency, child: child),

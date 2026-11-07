@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import '../core/algorithm.dart';
 import '../core/models.dart';
 import '../services/backend.dart';
+import '../services/draft_store.dart';
 import '../services/history_codec.dart';
 
 const colorPalette = <int>[
@@ -65,10 +66,45 @@ class AppState extends ChangeNotifier {
 
   Future<void> _afterLogin() async {
     _resetData();
-    addItem();
-    addItem();
-    shipment.accessories = [for (final n in defaultAccessories) Accessory(name: n)];
+    final draft = await loadDraft(user!.email);
+    if (draft != null && draft.items.isNotEmpty) {
+      // 上次没算完/没保存就关掉了: 接着填
+      items = draft.items;
+      _nextItemId = items.fold(0, (m, i) => i.id > m ? i.id : m) + 1;
+      _colorCursor = items.length;
+      shipment = draft.shipment;
+      if (shipment.accessories.isEmpty) shipment.accessories = [for (final n in defaultAccessories) Accessory(name: n)];
+      toast('已恢复上次未完成的输入 Restored your unfinished list');
+    } else {
+      addItem();
+      addItem();
+      shipment.accessories = [for (final n in defaultAccessories) Accessory(name: n)];
+    }
     await loadPresets();
+  }
+
+  /// 把目前的物品清单和货运信息存成草稿 (页面隐藏、计算、汇入等时机自动呼叫)
+  Future<void> saveDraftNow() async {
+    final u = user;
+    if (u == null) return;
+    await saveDraft(u.email, items, shipment);
+  }
+
+  /// 汇入装箱单; 回传汇入数量
+  int importItems(List<Item> imported, {required bool replace}) {
+    if (replace) {
+      items = [];
+      _colorCursor = 0;
+    }
+    for (final it in imported) {
+      items.add(it.copy()
+        ..id = _nextItemId++
+        ..color = colorPalette[_colorCursor++ % colorPalette.length]);
+    }
+    formGeneration++;
+    notifyListeners();
+    saveDraftNow();
+    return imported.length;
   }
 
   Future<void> loadPresets() async {
@@ -95,7 +131,12 @@ class AppState extends ChangeNotifier {
     return r;
   }
 
-  Future<void> logout({String message = ''}) async {
+  /// clearDraft: 使用者主动登出时清掉草稿 (共用电脑不留资料); 会话过期被登出时保留, 重新登入可接着填
+  Future<void> logout({String message = '', bool clearDraft = false}) async {
+    final u = user;
+    if (u != null) {
+      clearDraft ? await clearDraftFor(u.email) : await saveDraft(u.email, items, shipment);
+    }
     try {
       await backend.logout();
     } catch (_) {/* 本地状态照样清除 */}
@@ -140,6 +181,7 @@ class AppState extends ChangeNotifier {
     _colorCursor = 3;
     formGeneration++;
     notifyListeners();
+    saveDraftNow();
   }
 
   // ---------- 配件 ----------
@@ -186,6 +228,7 @@ class AppState extends ChangeNotifier {
     result = packContainers(items, selected).pushedToFarWall();
     selectedIndex = 0;
     notifyListeners();
+    saveDraftNow();
     return null;
   }
 

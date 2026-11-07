@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'config.dart';
 import 'services/backend.dart';
+import 'services/download.dart';
 import 'services/memory_backend.dart';
 import 'services/share_link.dart';
 import 'services/supabase_backend.dart';
@@ -65,6 +66,8 @@ class _ContainerCalcAppState extends State<ContainerCalcApp> {
         ?..hideCurrentSnackBar()
         ..showSnackBar(SnackBar(content: Text(m), backgroundColor: isError ? redErr : navy, duration: const Duration(seconds: 4)));
     };
+    // 切换分页、关掉或重新整理页面时自动保存草稿
+    onPageHide(widget.state.saveDraftNow);
     // 登出/被强制登出时, 关掉个人资料、管理后台等已开启的页面
     widget.state.addListener(() {
       if (widget.state.user == null) _nav.currentState?.popUntil((r) => r.isFirst);
