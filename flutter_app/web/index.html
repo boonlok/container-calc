@@ -20,6 +20,9 @@
 
   <title>集装箱装载计算器 Container Loading Calculator</title>
   <link rel="manifest" href="manifest.json">
+  <!-- 提前下载程序和中文字体, 与引擎同时进行, 缩短第一次打开的时间 -->
+  <link rel="preload" href="main.dart.js" as="script">
+  <link rel="preload" href="assets/assets/fonts/NotoSansSC-subset.ttf" as="fetch" crossorigin>
 
   <style>
     html, body { margin: 0; height: 100%; background: #14233A; }
@@ -67,7 +70,17 @@
         clearTimeout(slow); clearTimeout(fail);
         splash.classList.add('hide');
         setTimeout(function () { splash.remove(); }, 300);
+        // 把这次下载过的档案交给离线快取
+        if (navigator.serviceWorker) {
+          navigator.serviceWorker.ready.then(function (reg) {
+            var urls = performance.getEntriesByType('resource').map(function (r) { return r.name; }).concat([location.href.split('#')[0]]);
+            if (reg.active) reg.active.postMessage({ type: 'cache-urls', urls: urls });
+          }).catch(function () {});
+        }
       });
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('sw.js').catch(function () {});
+      }
     })();
   </script>
   <script src="flutter_bootstrap.js" async></script>

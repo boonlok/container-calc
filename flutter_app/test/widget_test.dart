@@ -118,4 +118,31 @@ void main() {
     expect(colorToHex(first.color), '#e74c3c');
   });
 
+
+  testWidgets('planner screens fit a phone: sample → calculate → results without overflow', (tester) async {
+    await _loadFont();
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final b = MemoryBackend();
+    await b.register('a@x.com', 'secret1', '', '');
+    final state = AppState(b);
+    await state.boot();
+    await state.login('a@x.com', 'secret1');
+    await tester.pumpWidget(ContainerCalcApp(state: state));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(tester.takeException(), isNull, reason: 'home fits a phone');
+    expect(find.widgetWithText(TextFormField, '总数量 PCS'), findsWidgets, reason: 'phone uses item cards');
+
+    await tester.ensureVisible(find.byKey(const ValueKey('loadSample')));
+    await tester.tap(find.byKey(const ValueKey('loadSample')));
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(state.items.length, 3);
+    await tester.ensureVisible(find.byKey(const ValueKey('calcBtn')));
+    await tester.tap(find.byKey(const ValueKey('calcBtn')));
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(state.result, isNotNull);
+    expect(tester.takeException(), isNull, reason: 'results fit a phone');
+    expect(find.byKey(const ValueKey('startLoading')), findsOneWidget);
+  });
 }

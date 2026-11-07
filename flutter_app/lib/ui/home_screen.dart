@@ -132,13 +132,16 @@ class _ShipmentCard extends StatefulWidget {
 }
 
 class _ShipmentCardState extends State<_ShipmentCard> {
+  // 手机上栏位不能比画面宽
+  double _w(double want) => want.clamp(0, MediaQuery.of(context).size.width - 82).toDouble();
+
   Widget _text(String label, String initial, void Function(String) onChanged, {double width = 240}) => SizedBox(
-        width: width,
+        width: _w(width),
         child: TextFormField(initialValue: initial, onChanged: onChanged, decoration: InputDecoration(labelText: label)),
       );
 
   Widget _date(String label, String value, void Function(String) onSet) => SizedBox(
-        width: 180,
+        width: _w(180),
         child: InkWell(
           onTap: () async {
             final now = DateTime.now();
@@ -217,6 +220,10 @@ class _ItemsCard extends StatelessWidget {
       trailing: TextButton.icon(key: const ValueKey('loadSample'), onPressed: state.loadSample, icon: const Icon(Icons.auto_awesome, size: 16, color: orangeDark), label: const Text('试用示例 Try Sample', style: TextStyle(color: orangeDark, fontSize: 12))),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         LayoutBuilder(builder: (context, box) {
+          // 手机: 每样物品一张卡片, 不用左右滑表格
+          if (box.maxWidth < 720) {
+            return Column(children: [for (final it in state.items) _ItemRow(key: ValueKey('c${it.id}'), item: it, state: state, compact: true)]);
+          }
           final minW = box.maxWidth < 960 ? 960.0 : box.maxWidth;
           return SingleChildScrollView(
             scrollDirection: Axis.horizontal,
@@ -249,9 +256,10 @@ class _ItemsCard extends StatelessWidget {
 }
 
 class _ItemRow extends StatefulWidget {
-  const _ItemRow({super.key, required this.item, required this.state});
+  const _ItemRow({super.key, required this.item, required this.state, this.compact = false});
   final Item item;
   final AppState state;
+  final bool compact;
 
   @override
   State<_ItemRow> createState() => _ItemRowState();
@@ -273,6 +281,53 @@ class _ItemRowState extends State<_ItemRow> {
         ),
       );
 
+  Widget _field(String label, double value, void Function(double) set) => Expanded(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 3),
+          child: TextFormField(
+            initialValue: value == 0 ? '' : fmt(value),
+            keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[0-9.]'))],
+            decoration: InputDecoration(labelText: label),
+            onChanged: (v) => setState(() => set(double.tryParse(v) ?? 0)),
+          ),
+        ),
+      );
+
+  Widget _card(Item it) => Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.fromLTRB(10, 10, 6, 10),
+        decoration: BoxDecoration(color: const Color(0xFFFAFBFD), border: Border(left: BorderSide(color: Color(it.color), width: 4)), borderRadius: BorderRadius.circular(10)),
+        child: Column(children: [
+          Row(children: [
+            InkWell(onTap: _pickColor, child: Container(width: 26, height: 26, decoration: BoxDecoration(color: Color(it.color), borderRadius: BorderRadius.circular(6)))),
+            const SizedBox(width: 8),
+            Expanded(child: TextFormField(initialValue: it.name, decoration: const InputDecoration(labelText: '物品名称 Item Name'), onChanged: (v) => it.name = v)),
+            IconButton(tooltip: '删除 Remove', icon: const Icon(Icons.close, size: 18), onPressed: () => widget.state.removeItem(it.id)),
+          ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            _field('总数量 PCS', it.totalPcs, (v) => it.totalPcs = v),
+            _field('每箱 PCS/Box', it.pcsPerBox, (v) => it.pcsPerBox = v),
+            _field('每箱重 KG', it.boxWeight, (v) => it.boxWeight = v),
+          ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            _field('长 L cm', it.boxL, (v) => it.boxL = v),
+            _field('宽 W cm', it.boxW, (v) => it.boxW = v),
+            _field('高 H cm', it.boxH, (v) => it.boxH = v),
+          ]),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: Text(it.boxesNeeded > 0 ? '共 ${it.boxesNeeded} 箱 boxes' : '—', style: const TextStyle(fontSize: 12.5, color: textSecondary, fontWeight: FontWeight.w600)),
+            ),
+          ),
+        ]),
+      );
+
   Future<void> _pickColor() async {
     final c = await showDialog<int>(
       context: context,
@@ -292,6 +347,7 @@ class _ItemRowState extends State<_ItemRow> {
   @override
   Widget build(BuildContext context) {
     final it = widget.item;
+    if (widget.compact) return _card(it);
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: Row(children: [
@@ -342,14 +398,15 @@ class _PresetsCard extends StatelessWidget {
   Widget _chip(BuildContext context, Preset p) {
     final on = p.id != null && state.activePresetIds.contains(p.id);
     return Container(
+      constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width - 82), // 手机上不超出画面
       padding: const EdgeInsets.fromLTRB(4, 4, 8, 4),
       decoration: BoxDecoration(color: on ? const Color(0xFFF5F7FA) : const Color(0xFFFAFBFC), border: Border.all(color: on ? navy : borderColor, width: 1.5), borderRadius: BorderRadius.circular(6)),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Checkbox(value: on, activeColor: orange, onChanged: (v) => state.togglePreset(p.id!, v == true)),
-        Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Flexible(child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(p.name, style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13)),
           Text('${fmt(p.length)}×${fmt(p.width)}×${fmt(p.height)} cm · Max ${fmt(p.maxPayload)}kg', style: const TextStyle(fontSize: 11, color: textSecondary)),
-        ]),
+        ])),
         TextButton(onPressed: () => showPresetDialog(context, state, p), child: const Text('编辑 Edit', style: TextStyle(fontSize: 11, color: textSecondary))),
       ]),
     );
