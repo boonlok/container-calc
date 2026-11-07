@@ -278,7 +278,7 @@ class _WorkerScreenState extends State<WorkerScreen> {
           Padding(
             padding: const EdgeInsets.all(8),
             child: show3d
-                ? IsoView(widget.container, height: 300, load: LoadView(s.allocIndex, s.column), xShift: plan.doorGap, camera: doorCamera(widget.container), labels: false, hint: false)
+                ? IsoView(widget.container, height: 300, load: LoadView(s.allocIndex, s.column), xShift: plan.farShift, camera: doorCamera(widget.container), labels: false, hint: false)
                 : DrawView(drawColumnFace(widget.container, a, s.boxes)),
           ),
         ]),
@@ -413,7 +413,7 @@ class _WorkerScreenState extends State<WorkerScreen> {
             const SizedBox(height: 12),
             ClipRRect(
               borderRadius: BorderRadius.circular(14),
-              child: SizedBox(height: 260, child: LayoutBuilder(builder: (context, box) => CustomPaint(size: Size(box.maxWidth, 260), painter: DrawListPainter(renderIso(widget.container, doorCamera(widget.container), w: box.maxWidth, h: 260, labels: false, xShift: plan.doorGap))))),
+              child: SizedBox(height: 260, child: LayoutBuilder(builder: (context, box) => CustomPaint(size: Size(box.maxWidth, 260), painter: DrawListPainter(renderIso(widget.container, doorCamera(widget.container), w: box.maxWidth, h: 260, labels: false, xShift: plan.farShift))))),
             ),
           ]),
         ),

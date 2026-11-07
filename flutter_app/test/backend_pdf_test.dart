@@ -117,7 +117,7 @@ void main() {
 
     test('mixed container: summary + 4 page kinds per unit, A3 landscape, font subset is small', () async {
       final items = List.generate(11, (i) => item(i + 1, '物品${i + 1} Item ${i + 1}${i % 3 == 0 ? ' 长名称测试用的物品名称' : ''}', 200.0 + i * 40, 20.0 + i * 4, 18.0 + (i % 4) * 5, 15.0 + (i % 5) * 6, color: cols[i]));
-      final r = packContainers(items, presets);
+      final r = packContainers(items, presets).pushedToFarWall();
       expect(r.containers.length, greaterThan(1));
       final bytes = await buildPdf(result: r, shipment: ship, user: user, fontBytes: font, now: DateTime(2026, 11, 7, 9, 30));
       File('build/test_mixed.pdf')..createSync(recursive: true)..writeAsBytesSync(bytes);

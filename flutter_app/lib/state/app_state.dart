@@ -183,7 +183,7 @@ class AppState extends ChangeNotifier {
     final selected = presets.where((p) => p.id != null && activePresetIds.contains(p.id)).toList();
     if (selected.isEmpty) errors.add('请至少启用一种集装箱尺寸 Please enable at least one container size');
     if (errors.isNotEmpty) return errors.first;
-    result = packContainers(items, selected);
+    result = packContainers(items, selected).pushedToFarWall();
     selectedIndex = 0;
     notifyListeners();
     return null;

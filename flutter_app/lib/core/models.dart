@@ -133,6 +133,12 @@ class Allocation {
   double get endLength => round2(startLength + lengthUsed);
   int get fullGrid => columns * horizontal * vertical;
 
+  Allocation shifted(double d) => Allocation(
+        itemId: itemId, name: name, color: color, boxesPlaced: boxesPlaced, pcsPlaced: pcsPlaced, boxL: boxL, boxW: boxW, boxH: boxH,
+        horizontal: horizontal, vertical: vertical, columns: columns, rotated: rotated, depthUnit: depthUnit, boxWeight: boxWeight,
+        pcsPerBox: pcsPerBox, lengthUsed: lengthUsed, startLength: round2(startLength + d),
+      );
+
   Map<String, Object?> toJson() => {
         'itemId': itemId, 'name': name, 'color': colorToHex(color), 'boxesPlaced': boxesPlaced, 'pcsPlaced': pcsPlaced,
         'boxL': boxL, 'boxW': boxW, 'boxH': boxH, 'horizontal': horizontal, 'vertical': vertical, 'columns': columns,
@@ -173,6 +179,17 @@ class ContainerResult {
   final List<Allocation> allocations;
   final double utilization, totalWeightUsed, maxPayload;
 
+  /// 货物整体顶住柜底, 剩余空隙留在柜门这边 (现场就是从最里面开始装的)。重复呼叫结果不变。
+  ContainerResult pushedToFarWall() {
+    if (allocations.isEmpty) return this;
+    final gap = round2(L - allocations.last.endLength);
+    if (gap <= 0) return this;
+    return ContainerResult(
+      containerType: containerType, L: L, W: W, H: H, allocations: [for (final a in allocations) a.shifted(gap)],
+      utilization: utilization, totalWeightUsed: totalWeightUsed, maxPayload: maxPayload,
+    );
+  }
+
   Map<String, Object?> toJson() => {
         'containerType': containerType, 'L': L, 'W': W, 'H': H, 'utilization': utilization,
         'totalWeightUsed': totalWeightUsed, 'maxPayload': maxPayload,
@@ -212,6 +229,8 @@ class PackResult {
 
   /// 计算当时的物品清单 (PDF 总览用; 不进历史记录)
   final List<Item> items;
+
+  PackResult pushedToFarWall() => PackResult([for (final c in containers) c.pushedToFarWall()], unfulfilled, items: items);
 
   Map<String, Object?> toJson() => {
         'containers': containers.map((c) => c.toJson()).toList(),

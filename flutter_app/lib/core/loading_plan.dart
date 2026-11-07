@@ -54,6 +54,13 @@ class LoadingPlan {
     return g < 0 ? 0 : round2(g);
   }
 
+  /// 画 3D 时还要往柜底平移多少。新计划已经顶住柜底 (= 0); 旧的工人链接还是靠柜门摆放, 靠这个修正
+  double get farShift {
+    if (container.allocations.isEmpty) return 0;
+    final g = container.L - container.allocations.last.endLength;
+    return g < 0 ? 0 : round2(g);
+  }
+
   /// 这一步的货离柜底多远 (工人从最里面开始, 量柜底比量柜门直觉)
   double fromFarWall(LoadStep s) {
     var d = 0.0;

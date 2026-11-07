@@ -47,7 +47,8 @@ UnpackedHistory unpackHistory(Map<String, Object?> raw) {
     final it = rawItems[i];
     if (it is Map) items.add(Item.fromJson(it.cast<String, Object?>(), i));
   }
-  final result = PackResult.fromJson(data['result'], items: items);
+  // 旧记录的货物靠柜门摆放, 载入时统一成顶住柜底
+  final result = PackResult.fromJson(data['result'], items: items)?.pushedToFarWall();
   final sh = data['shipment'];
   return UnpackedHistory(items, result, sh is Map ? ShipmentInfo.fromJson(sh.cast<String, Object?>()) : null);
 }

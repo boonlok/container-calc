@@ -87,7 +87,12 @@ SectionInfo describeAllocation(Allocation alloc, ContainerResult c, int idx) {
     final rest = round2(c.L - endLength);
     if (rest > 1) notes.add('此区块之后至柜底尚余 ${fmt(rest)} cm 空间，请用填充物顶紧避免货物前后滑动 Remaining length at back');
   }
-  if (idx == 0) notes.add('最靠柜门: 开门后最先看到本区块，卸货时最先取出 First out');
+  if (idx == 0) {
+    notes.add('最靠柜门: 开门后最先看到本区块，卸货时最先取出 First out');
+    if (alloc.startLength > 1) {
+      notes.add('货物顶住柜底后，本区块与柜门之间尚余 ${fmt(alloc.startLength)} cm，请用填充物顶紧避免货物前后滑动 Fill the gap at the door');
+    }
+  }
 
   return SectionInfo(
     section: idx + 1, name: alloc.name, color: alloc.color, pcsPerBox: pcsPerBox, boxes: alloc.boxesPlaced,

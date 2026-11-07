@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:container_calc/core/algorithm.dart';
@@ -6,9 +7,13 @@ import 'package:container_calc/core/models.dart';
 import 'package:container_calc/render/draw.dart';
 import 'package:container_calc/render/flat_views.dart';
 import 'package:container_calc/render/iso.dart';
+import 'package:container_calc/render/notes.dart';
+import 'package:container_calc/services/history_codec.dart';
+import 'package:container_calc/services/memory_backend.dart';
 import 'package:container_calc/services/pdf_export.dart';
 import 'package:container_calc/services/progress_store.dart';
 import 'package:container_calc/services/share_link.dart';
+import 'package:container_calc/state/app_state.dart';
 import 'package:container_calc/ui/theme.dart';
 import 'package:container_calc/ui/worker_screen.dart';
 import 'package:flutter/material.dart';
@@ -69,6 +74,62 @@ void main() {
       final l = LoadingPlan.layoutOf(a, 23);
       expect(l.fullLayers, 4);
       expect(l.topLayerBoxes, 3);
+    });
+  });
+
+  group('cargo against the far wall', () {
+    final raw = mixed();
+    final c = raw.pushedToFarWall();
+
+    test('last section touches the far wall, gap is at the door, nothing else changes', () {
+      expect(raw.allocations.first.startLength, 0);
+      expect(c.allocations.last.endLength, c.L);
+      expect(c.allocations.first.startLength, greaterThan(1));
+      for (var i = 0; i < c.allocations.length; i++) {
+        final a = c.allocations[i], b = raw.allocations[i];
+        expect([a.boxesPlaced, a.horizontal, a.vertical, a.columns, a.rotated, a.lengthUsed], [b.boxesPlaced, b.horizontal, b.vertical, b.columns, b.rotated, b.lengthUsed]);
+      }
+      // 区块之间仍然紧贴
+      for (var i = 1; i < c.allocations.length; i++) {
+        expect(c.allocations[i].startLength, closeTo(c.allocations[i - 1].endLength, 0.01));
+      }
+    });
+
+    test('idempotent, and LoadingPlan needs no extra shift', () {
+      expect(identical(c.pushedToFarWall(), c), isTrue);
+      expect(LoadingPlan(c).farShift, 0);
+      expect(LoadingPlan(raw).farShift, closeTo(LoadingPlan(raw).doorGap, 0.01));
+    });
+
+    test('notes: gap is reported at the door, not at the far end', () {
+      final first = describeAllocation(c.allocations.first, c, 0);
+      final last = describeAllocation(c.allocations.last, c, c.allocations.length - 1);
+      expect(first.notes.any((n) => n.contains('Fill the gap at the door')), isTrue);
+      expect(last.notes.any((n) => n.contains('Remaining length at back')), isFalse);
+    });
+
+    test('a full container has no gap', () {
+      final full = ContainerResult(containerType: 'x', L: 100, W: 100, H: 100, utilization: 1, totalWeightUsed: 0, maxPayload: 1, allocations: [
+        Allocation(itemId: 1, name: 'a', color: 0, boxesPlaced: 1, pcsPlaced: 1, boxL: 100, boxW: 100, boxH: 100, horizontal: 1, vertical: 1, columns: 1, rotated: false, depthUnit: 100, boxWeight: 0, pcsPerBox: 1, lengthUsed: 100, startLength: 0),
+      ]);
+      expect(identical(full.pushedToFarWall(), full), isTrue);
+    });
+
+    test('old history records are converted when loaded', () {
+      final r = PackResult([raw], const []);
+      final h = unpackHistory(jsonDecode(jsonEncode({'items': <Object>[], 'result': r.toJson()})) as Map<String, Object?>);
+      expect(h.result!.containers.first.allocations.last.endLength, raw.L);
+    });
+
+    test('a calculation in the app uses the far wall', () async {
+      final b = MemoryBackend();
+      await b.register('a@x.com', 'secret1', '', '');
+      final s = AppState(b);
+      await s.login('a@x.com', 'secret1');
+      s.items = [item(1, 'A', 100, 50, 40, 30)];
+      expect(s.calculate(), isNull);
+      final cc = s.result!.containers.first;
+      expect(cc.allocations.last.endLength, cc.L);
     });
   });
 
