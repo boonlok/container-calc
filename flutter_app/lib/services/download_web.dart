@@ -40,3 +40,19 @@ Future<Uint8List?> pickImageBytes() {
   input.click();
   return done.future;
 }
+
+/// 装柜时屏幕不要自动熄灭 (浏览器不支援就算了)
+void keepScreenOn() {
+  try {
+    web.window.navigator.wakeLock.request('screen').toDart.then((_) {}, onError: (_) {});
+  } catch (_) {/* 不支援 */}
+}
+
+Future<bool> copyToClipboard(String text) async {
+  try {
+    await web.window.navigator.clipboard.writeText(text).toDart;
+    return true;
+  } catch (_) {
+    return false;
+  }
+}

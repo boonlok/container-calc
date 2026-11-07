@@ -8,9 +8,11 @@ environment:
 
 dependencies:
   archive: ^4.6.0
+  barcode: ^2.2.9
   flutter:
     sdk: flutter
   pdf: ^3.13.1
+  shared_preferences: ^2.5.6
   supabase_flutter: ^2.18.3
   vector_math: ^2.4.4
   web: ^1.1.2

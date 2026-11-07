@@ -130,6 +130,18 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 载入一组示例物品, 第一次使用时不用自己想数字
+  void loadSample() {
+    items = [
+      Item(id: _nextItemId++, name: '钢管 Steel Pipe', totalPcs: 3600, pcsPerBox: 12, boxL: 60, boxW: 40, boxH: 40, boxWeight: 18, color: colorPalette[0]),
+      Item(id: _nextItemId++, name: '配件盒 Parts Box', totalPcs: 8400, pcsPerBox: 20, boxL: 30, boxW: 30, boxH: 25, boxWeight: 6, color: colorPalette[1]),
+      Item(id: _nextItemId++, name: '机柜 Cabinet', totalPcs: 60, pcsPerBox: 1, boxL: 100, boxW: 50, boxH: 50, boxWeight: 35, color: colorPalette[2]),
+    ];
+    _colorCursor = 3;
+    formGeneration++;
+    notifyListeners();
+  }
+
   // ---------- 配件 ----------
   void addAccessory() {
     shipment.accessories.add(Accessory());

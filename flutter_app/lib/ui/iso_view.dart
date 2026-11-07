@@ -12,9 +12,13 @@ import 'draw_view.dart';
 import 'theme.dart';
 
 class IsoView extends StatefulWidget {
-  const IsoView(this.container, {super.key, this.height = 320});
+  const IsoView(this.container, {super.key, this.height = 320, this.load, this.camera, this.labels = true, this.hint = true, this.xShift = 0});
   final ContainerResult container;
   final double height;
+  final LoadView? load;
+  final IsoCamera? camera; // 起始视角 (预设为总览斜视角)
+  final bool labels, hint;
+  final double xShift;
 
   @override
   State<IsoView> createState() => _IsoViewState();
@@ -37,7 +41,7 @@ class _IsoViewState extends State<IsoView> {
   }
 
   void _reset() {
-    final c = IsoCamera.defaultFor(widget.container);
+    final c = widget.camera ?? IsoCamera.defaultFor(widget.container);
     yaw = c.yaw;
     pitch = c.pitch;
     zoom = 1;
@@ -46,7 +50,7 @@ class _IsoViewState extends State<IsoView> {
   @override
   Widget build(BuildContext context) => LayoutBuilder(builder: (context, box) {
         final w = box.maxWidth, h = widget.height;
-        final list = renderIso(widget.container, IsoCamera.fromAngles(yaw, pitch, zoom: zoom), w: w, h: h);
+        final list = renderIso(widget.container, IsoCamera.fromAngles(yaw, pitch, zoom: zoom), w: w, h: h, load: widget.load, labels: widget.labels, xShift: widget.xShift);
         return Listener(
           onPointerSignal: (e) {
             if (e is PointerScrollEvent) {
@@ -65,18 +69,19 @@ class _IsoViewState extends State<IsoView> {
               cursor: SystemMouseCursors.grab,
               child: Stack(children: [
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
+                  borderRadius: BorderRadius.circular(8),
                   child: SizedBox(width: w, height: h, child: CustomPaint(painter: DrawListPainter(list))),
                 ),
-                Positioned(
-                  right: 8,
-                  bottom: 6,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                    decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.85), borderRadius: BorderRadius.circular(3)),
-                    child: const Text('拖曳旋转 · 滚轮缩放 · 双击还原 Drag / Scroll / Double-click', style: TextStyle(fontSize: 10, color: textSecondary)),
+                if (widget.hint)
+                  Positioned(
+                    right: 8,
+                    bottom: 6,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.85), borderRadius: BorderRadius.circular(3)),
+                      child: const Text('拖曳旋转 · 滚轮缩放 · 双击还原 Drag / Scroll / Double-click', style: TextStyle(fontSize: 10, color: textSecondary)),
+                    ),
                   ),
-                ),
               ]),
             ),
           ),

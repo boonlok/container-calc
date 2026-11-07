@@ -9,6 +9,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
+import 'package:barcode/barcode.dart';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -289,7 +290,9 @@ pw.Widget _miniHeader(UserProfile? u, String title, DateTime now) => pw.Column(c
       pw.SizedBox(height: 4 * _mm),
     ]);
 
-pw.Widget _firstPage(ContainerResult c, int idx, ShipmentInfo s, UserProfile? u, pw.ImageProvider? logo, DateTime now) {
+const _pdfQrMaxChars = 1100;
+
+pw.Widget _firstPage(ContainerResult c, int idx, ShipmentInfo s, UserProfile? u, pw.ImageProvider? logo, DateTime now, String? qr) {
   const gap = 6 * _mm;
   final shown = c.allocations.take(_circled.length).toList();
   final acc = s.accessories.where((a) => a.name.isNotEmpty).toList();
@@ -390,6 +393,14 @@ pw.Widget _firstPage(ContainerResult c, int idx, ShipmentInfo s, UserProfile? u,
             pw.Expanded(
               flex: 50,
               child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                if (qr != null) ...[
+                  pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
+                    pw.BarcodeWidget(barcode: Barcode.qrCode(errorCorrectLevel: BarcodeQRCorrectionLevel.low), data: qr, width: 24 * _mm, height: 24 * _mm, drawText: false),
+                    pw.SizedBox(width: 2 * _mm),
+                    pw.Expanded(child: _txt('手机扫码\n照着装柜\nScan to load', style: pw.TextStyle(fontSize: 7.5, color: _navy))),
+                  ]),
+                  pw.SizedBox(height: 2 * _mm),
+                ],
                 for (var i = 0; i < c.allocations.length && i < _circled.length; i++)
                   legendRow(c.allocations[i].color, '${_circled[i]} ${c.allocations[i].name}  ${fmt(c.allocations[i].startLength)}-${fmt(c.allocations[i].endLength)} cm', 7.5),
               ]),
@@ -582,6 +593,7 @@ Future<Uint8List> buildPdf({
   required ShipmentInfo shipment,
   required UserProfile? user,
   List<Item> itemsFallback = const [],
+  String Function(ContainerResult c, int unit, int total)? linkFor,
   Uint8List? fontBytes,
   DateTime? now,
 }) async {
@@ -613,7 +625,10 @@ Future<Uint8List> buildPdf({
   for (var idx = 0; idx < result.containers.length; idx++) {
     final c = result.containers[idx];
     await Future<void>.delayed(Duration.zero); // 让出主线程, 页面不会看起来卡死
-    doc.addPage(pw.Page(pageTheme: pageTheme, build: (_) => _firstPage(c, idx, shipment, user, logo, at)));
+    // 太长的链接印出来扫不动, 就不印二维码
+    final link = linkFor?.call(c, idx + 1, result.containers.length);
+    final qr = (link != null && link.length <= _pdfQrMaxChars) ? link : null;
+    doc.addPage(pw.Page(pageTheme: pageTheme, build: (_) => _firstPage(c, idx, shipment, user, logo, at, qr)));
     doc.addPage(pw.MultiPage(
       pageTheme: pageTheme,
       header: (_) => _miniHeader(user, 'UNIT #${idx + 1} · ${c.containerType} · Loading Sequence & Worker Notes 装柜顺序与注意事项', at),

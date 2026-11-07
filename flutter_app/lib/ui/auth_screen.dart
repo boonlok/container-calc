@@ -3,11 +3,25 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../core/algorithm.dart';
+import '../core/models.dart';
+import '../render/iso.dart';
 import '../services/backend.dart';
 import '../state/app_state.dart';
+import 'draw_view.dart';
 import 'theme.dart';
 
 enum _Mode { login, register, forgot }
+
+/// 登录页的装饰图: 用真实算法算出一个混装柜
+final _heroArt = () {
+  Item it(int id, double n, double l, double w, double h, int color) => Item(id: id, name: '', totalPcs: n, pcsPerBox: 1, boxL: l, boxW: w, boxH: h, color: color);
+  final c = packContainers(
+    [it(1, 240, 60, 40, 40, 0xFFE8631C), it(2, 420, 30, 30, 25, 0xFF3B9BD9), it(3, 60, 100, 50, 50, 0xFF2EBF8A), it(4, 90, 48, 40, 30, 0xFFF2B705)],
+    [Preset(name: '40HC', length: 1203, width: 235, height: 269, maxPayload: 28600)],
+  ).containers.first;
+  return renderIso(c, IsoCamera(const Vec3(-0.62, 0.42, 0.66)), w: 560, h: 280, labels: false);
+}();
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key, required this.state});
@@ -129,29 +143,82 @@ class _AuthScreenState extends State<AuthScreen> {
         child: Text(text, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
       );
 
-  @override
-  Widget build(BuildContext context) => Scaffold(
-        backgroundColor: navy,
-        body: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
+  Widget _formCard() => Container(
+        width: 400,
+        padding: const EdgeInsets.fromLTRB(28, 26, 28, 18),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: const [BoxShadow(color: Color(0x40000000), blurRadius: 30, offset: Offset(0, 10))]),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          Center(
             child: Container(
-              width: 400,
-              padding: const EdgeInsets.fromLTRB(28, 28, 28, 20),
-              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(10)),
-              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-                const Icon(Icons.inventory_2_outlined, color: orange, size: 36),
-                const SizedBox(height: 8),
-                const Text('集装箱装载计算器', textAlign: TextAlign.center, style: TextStyle(fontSize: 19, fontWeight: FontWeight.w700, color: navy)),
-                const Text('CONTAINER LOADING CALCULATOR', textAlign: TextAlign.center, style: TextStyle(fontSize: 10.5, color: textSecondary, letterSpacing: 0.4)),
-                const SizedBox(height: 18),
-                if (widget.state.backend.isDemo) _banner('演示模式：尚未设置 Supabase，资料只在此页面内，重新整理就会消失 Demo mode: not connected to Supabase, data is not saved', const Color(0xFFFFF7E0), const Color(0xFF8A6D00)),
-                if (error.isNotEmpty) _banner(error, const Color(0xFFFBEAE8), redErr),
-                if (info.isNotEmpty) _banner(info, const Color(0xFFE7F3EE), greenOk),
-                ..._form(),
-              ]),
+              width: 46,
+              height: 46,
+              decoration: BoxDecoration(color: orange, borderRadius: BorderRadius.circular(12)),
+              child: const Icon(Icons.view_in_ar, color: Colors.white, size: 26),
             ),
           ),
+          const SizedBox(height: 10),
+          const Text('集装箱装载计算器', textAlign: TextAlign.center, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: navy)),
+          const Text('CONTAINER LOADING CALCULATOR', textAlign: TextAlign.center, style: TextStyle(fontSize: 10.5, color: textSecondary, letterSpacing: 0.4)),
+          const SizedBox(height: 18),
+          if (widget.state.backend.isDemo) _banner('演示模式：尚未设置 Supabase，资料只在此页面内，重新整理就会消失 Demo mode: not connected to Supabase, data is not saved', const Color(0xFFFFF7E0), const Color(0xFF8A6D00)),
+          if (error.isNotEmpty) _banner(error, const Color(0xFFFBEAE8), redErr),
+          if (info.isNotEmpty) _banner(info, const Color(0xFFE7F3EE), greenOk),
+          ..._form(),
+        ]),
+      );
+
+  Widget _hero() => ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Text('算得准，装得快', style: TextStyle(fontSize: 38, fontWeight: FontWeight.w800, color: Colors.white, height: 1.2)),
+          const SizedBox(height: 4),
+          const Text('Plan it right. Load it fast.', style: TextStyle(fontSize: 16, color: Color(0xFFB9C7D8))),
+          const SizedBox(height: 22),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(14),
+            child: SizedBox(width: 560, height: 280, child: CustomPaint(painter: DrawListPainter(_heroArt))),
+          ),
+          const SizedBox(height: 22),
+          _point(Icons.bolt, '几秒算出最省的柜型组合', 'The cheapest container mix in seconds'),
+          _point(Icons.phone_iphone, '工人手机扫码，一列一列照着装', 'Workers scan and follow column by column'),
+          _point(Icons.picture_as_pdf_outlined, '一键导出 A3 装柜方案 PDF', 'One-click A3 loading plan PDF'),
+        ]),
+      );
+
+  Widget _point(IconData icon, String zh, String en) => Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Row(children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(color: Colors.white.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(10)),
+            child: Icon(icon, size: 19, color: const Color(0xFFFFB27F)),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(zh, style: const TextStyle(color: Colors.white, fontSize: 14.5, fontWeight: FontWeight.w600)),
+              Text(en, style: const TextStyle(color: Color(0xFF9FB0C3), fontSize: 11.5)),
+            ]),
+          ),
+        ]),
+      );
+
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        body: Container(
+          decoration: const BoxDecoration(gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [navy, navyLight])),
+          child: LayoutBuilder(builder: (context, box) {
+            final wide = box.maxWidth >= 1040;
+            return Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: wide
+                    ? Row(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.center, children: [_hero(), const SizedBox(width: 56), _formCard()])
+                    : _formCard(),
+              ),
+            );
+          }),
         ),
       );
 

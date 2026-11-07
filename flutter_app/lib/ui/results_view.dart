@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../core/loading_plan.dart';
 import '../core/models.dart';
 import '../render/draw.dart' as dr;
 import '../render/flat_views.dart';
@@ -10,11 +11,14 @@ import '../render/iso.dart';
 import '../render/notes.dart';
 import '../services/download.dart';
 import '../services/pdf_export.dart';
+import '../services/share_link.dart';
 import '../state/app_state.dart';
 import 'dialogs.dart';
 import 'draw_view.dart';
 import 'iso_view.dart';
+import 'share_dialog.dart';
 import 'theme.dart';
+import 'worker_screen.dart';
 
 class ResultsView extends StatefulWidget {
   const ResultsView({super.key, required this.state});
@@ -34,7 +38,10 @@ class _ResultsViewState extends State<ResultsView> {
     s.toast('正在生成 PDF... Generating PDF, please wait...');
     await Future<void>.delayed(const Duration(milliseconds: 30));
     try {
-      final bytes = await buildPdf(result: s.result!, shipment: s.shipment, user: s.user, itemsFallback: s.items);
+      final bytes = await buildPdf(
+        result: s.result!, shipment: s.shipment, user: s.user, itemsFallback: s.items,
+        linkFor: (c, unit, total) => workerLink(Uri.base, c, unit, total),
+      );
       if (openForPrint) {
         openPdfInNewTab(bytes);
         s.toast('已在新分页打开 PDF，可从那里打印 PDF opened in a new tab — print from there');
@@ -69,11 +76,13 @@ class _ResultsViewState extends State<ResultsView> {
     final idx = state.selectedIndex.clamp(0, r.containers.length - 1);
 
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      const Text('④ 计算结果 Results', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800, color: navy)),
+      const SizedBox(height: 10),
       Wrap(spacing: 12, runSpacing: 12, children: [
-        _stat('总集装箱数 Total Containers', '${r.containers.length}'),
-        _stat('柜型组合 Container Mix', mix, small: true),
-        _stat('总箱数 / PCS Total Boxes / PCS', '${r.totalBoxes} 箱 / ${fmt(r.totalPcs)} pcs', small: true),
-        _stat('平均空间利用率 Avg. Utilization', '${(r.avgUtilization * 100).toStringAsFixed(1)}%'),
+        _stat(Icons.view_in_ar, '总集装箱数 Containers', '${r.containers.length}'),
+        _stat(Icons.dashboard_outlined, '柜型组合 Container Mix', mix, small: true),
+        _stat(Icons.inventory_2_outlined, '总箱数 / PCS Boxes / PCS', '${r.totalBoxes} 箱 / ${fmt(r.totalPcs)} pcs', small: true),
+        _stat(Icons.speed, '平均利用率 Avg. Utilization', '${(r.avgUtilization * 100).toStringAsFixed(1)}%'),
       ]),
       const SizedBox(height: 14),
       if (r.unfulfilled.isNotEmpty)
@@ -90,6 +99,8 @@ class _ResultsViewState extends State<ResultsView> {
         child: Row(children: [for (var i = 0; i < r.containers.length; i++) _doorCard(r.containers[i], i, i == idx)]),
       ),
       const SizedBox(height: 14),
+      _workerBanner(context, r, idx),
+      const SizedBox(height: 14),
       _ContainerDetail(key: ValueKey(r.containers[idx]), container: r.containers[idx], index: idx),
       const SizedBox(height: 16),
       Wrap(spacing: 10, runSpacing: 10, children: [
@@ -104,14 +115,63 @@ class _ResultsViewState extends State<ResultsView> {
     ]);
   }
 
-  Widget _stat(String label, String value, {bool small = false}) => Container(
-        constraints: const BoxConstraints(minWidth: 220),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-        decoration: BoxDecoration(color: navy, borderRadius: BorderRadius.circular(6)),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(label, style: const TextStyle(fontSize: 10.5, color: Color(0xFF9FB0C3))),
-          const SizedBox(height: 2),
-          Text(value, style: TextStyle(fontSize: small ? 15 : 24, color: Colors.white, fontWeight: FontWeight.w600)),
+  /// 最醒目的下一步: 把计划交给现场工人
+  Widget _workerBanner(BuildContext context, PackResult r, int idx) {
+    final c = r.containers[idx];
+    final plan = LoadingPlan(c);
+    void open() => Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (ctx) => WorkerScreen(container: c, unit: idx + 1, totalUnits: r.containers.length, onExit: () => Navigator.of(ctx).pop())));
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(gradient: const LinearGradient(colors: [Color(0xFFFF8A3D), orange]), borderRadius: BorderRadius.circular(14), boxShadow: softShadow),
+      child: Wrap(alignment: WrapAlignment.spaceBetween, crossAxisAlignment: WrapCrossAlignment.center, spacing: 16, runSpacing: 12, children: [
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 620),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('货柜 ${idx + 1} 可以开始装了 Unit ${idx + 1} is ready to load', style: const TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 2),
+            Text('共 ${plan.steps.length} 列、${plan.totalBoxes} 箱，从柜底装到柜门，手机上一列一列照着做。 ${plan.steps.length} columns, ${plan.totalBoxes} boxes, far end to door.',
+                style: const TextStyle(color: Colors.white, fontSize: 12.5)),
+          ]),
+        ),
+        Wrap(spacing: 10, runSpacing: 8, children: [
+          FilledButton.icon(
+            key: const ValueKey('startLoading'),
+            style: FilledButton.styleFrom(backgroundColor: Colors.white, foregroundColor: orangeDark, padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14)),
+            onPressed: open,
+            icon: const Icon(Icons.play_arrow_rounded),
+            label: const Text('开始装柜 Start Loading', style: TextStyle(fontWeight: FontWeight.w800)),
+          ),
+          OutlinedButton.icon(
+            key: const ValueKey('workerQrBtn'),
+            style: OutlinedButton.styleFrom(foregroundColor: Colors.white, side: const BorderSide(color: Colors.white70), padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14)),
+            onPressed: () => showWorkerShareDialog(context, widget.state, c, idx + 1, r.containers.length),
+            icon: const Icon(Icons.qr_code_2),
+            label: const Text('工人二维码 Worker QR'),
+          ),
+        ]),
+      ]),
+    );
+  }
+
+  Widget _stat(IconData icon, String label, String value, {bool small = false}) => Container(
+        constraints: const BoxConstraints(minWidth: 240),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+        decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: softShadow),
+        child: Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(color: const Color(0xFFFFF1E8), borderRadius: BorderRadius.circular(10)),
+            child: Icon(icon, color: orangeDark, size: 21),
+          ),
+          const SizedBox(width: 12),
+          Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(label, style: const TextStyle(fontSize: 11, color: textSecondary)),
+            const SizedBox(height: 1),
+            Text(value, style: TextStyle(fontSize: small ? 15 : 23, color: navy, fontWeight: FontWeight.w800)),
+          ]),
         ]),
       );
 
@@ -123,7 +183,12 @@ class _ResultsViewState extends State<ResultsView> {
             width: 190,
             margin: const EdgeInsets.only(right: 12, bottom: 6),
             padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(color: navyLight, borderRadius: BorderRadius.circular(6), border: Border.all(color: selected ? orange : navy, width: 2)),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: [navyLight, navy]),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: selected ? orange : Colors.transparent, width: 2.5),
+              boxShadow: softShadow,
+            ),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('UNIT · ${(i + 1).toString().padLeft(2, '0')}', style: const TextStyle(fontSize: 10, color: yellow)),
               Text(c.containerType.split(' ').first, style: const TextStyle(fontSize: 17, color: Colors.white, fontWeight: FontWeight.w600)),
@@ -179,7 +244,7 @@ class _ContainerDetail extends StatelessWidget {
     final wPct = c.maxPayload > 0 ? (c.totalWeightUsed / c.maxPayload * 100).toStringAsFixed(1) : '—';
     final front = buildStackedLayers(c, true), back = buildStackedLayers(c, false);
     return Container(
-      decoration: BoxDecoration(color: Colors.white, border: Border.all(color: borderColor), borderRadius: BorderRadius.circular(6)),
+      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(14), boxShadow: softShadow),
       clipBehavior: Clip.antiAlias,
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
         Container(

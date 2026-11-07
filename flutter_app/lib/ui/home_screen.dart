@@ -45,9 +45,9 @@ class HomeScreen extends StatelessWidget {
                       Wrap(spacing: 10, runSpacing: 10, children: [
                         FilledButton.icon(
                           key: const ValueKey('calcBtn'),
-                          style: FilledButton.styleFrom(backgroundColor: orange, padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 16)),
-                          icon: const Icon(Icons.calculate_outlined, size: 18),
-                          label: const Text('计算装载方案 Calculate Loading Plan', style: TextStyle(fontWeight: FontWeight.w600)),
+                          style: FilledButton.styleFrom(backgroundColor: orange, padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 19)),
+                          icon: const Icon(Icons.bolt, size: 22),
+                          label: const Text('计算装载方案 Calculate Loading Plan', style: TextStyle(fontSize: 15, fontWeight: FontWeight.w800)),
                           onPressed: () {
                             final err = state.calculate();
                             if (err != null) {
@@ -60,7 +60,7 @@ class HomeScreen extends StatelessWidget {
                           },
                         ),
                         OutlinedButton.icon(
-                          style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16)),
+                          style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 19)),
                           icon: const Icon(Icons.folder_open_outlined, size: 18),
                           label: const Text('历史记录 History'),
                           onPressed: () => showHistoryDialog(context, state),
@@ -92,12 +92,24 @@ class _TopBar extends StatelessWidget {
         );
     return Container(
       width: double.infinity,
-      decoration: const BoxDecoration(color: navy, border: Border(bottom: BorderSide(color: orange, width: 4))),
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(colors: [navy, navyLight]),
+        border: Border(bottom: BorderSide(color: orange, width: 3)),
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
       child: Wrap(alignment: WrapAlignment.spaceBetween, crossAxisAlignment: WrapCrossAlignment.center, spacing: 16, runSpacing: 8, children: [
-        const Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('集装箱装载计算器 CONTAINER LOADING CALCULATOR', style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w600)),
-          Text('EXPORT PACKING PLANNER · CBM & PAYLOAD OPTIMIZER', style: TextStyle(color: Color(0xFF9FB0C3), fontSize: 10.5)),
+        Row(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 38,
+            height: 38,
+            decoration: BoxDecoration(color: orange, borderRadius: BorderRadius.circular(10)),
+            child: const Icon(Icons.view_in_ar, color: Colors.white, size: 22),
+          ),
+          const SizedBox(width: 10),
+          const Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text('集装箱装载计算器', style: TextStyle(color: Colors.white, fontSize: 17, fontWeight: FontWeight.w700, height: 1.2)),
+            Text('CONTAINER LOADING CALCULATOR', style: TextStyle(color: Color(0xFF9FB0C3), fontSize: 10.5, letterSpacing: 0.4)),
+          ]),
         ]),
         Wrap(spacing: 8, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
           Text(u.email, style: const TextStyle(color: Color(0xFF9FB0C3), fontSize: 11)),
@@ -145,8 +157,9 @@ class _ShipmentCardState extends State<_ShipmentCard> {
     final state = widget.state;
     final s = state.shipment;
     return SectionCard(
+      icon: Icons.local_shipping_outlined,
       title: '货运信息 Shipment Info',
-      hint: '这些资料会显示在导出的 PDF 报告表头 — Shown in the PDF report header',
+      hint: '选填，会显示在导出的 PDF 表头 — Optional, shown in the PDF header',
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Wrap(spacing: 12, runSpacing: 12, children: [
           _text('客户 Customer', s.customer, (v) => s.customer = v),
@@ -158,21 +171,30 @@ class _ShipmentCardState extends State<_ShipmentCard> {
           _text('检查 Checked', s.checked, (v) => s.checked = v, width: 180),
           _text('确认 Confirmed', s.confirmed, (v) => s.confirmed = v, width: 180),
         ]),
-        const SizedBox(height: 14),
-        const Text('配件清单 Accessories', style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: navy)),
-        const SizedBox(height: 8),
-        for (final a in s.accessories)
-          Padding(
-            key: ObjectKey(a),
-            padding: const EdgeInsets.only(bottom: 6),
-            child: Row(children: [
-              Expanded(child: TextFormField(initialValue: a.name, onChanged: (v) => a.name = v, decoration: const InputDecoration(hintText: '配件名称 Accessory Name'))),
-              const SizedBox(width: 8),
-              SizedBox(width: 100, child: TextFormField(initialValue: a.qty, onChanged: (v) => a.qty = v, decoration: const InputDecoration(hintText: '数量 Qty'))),
-              IconButton(tooltip: '删除 Remove', icon: const Icon(Icons.close, size: 16), onPressed: () => state.removeAccessory(a)),
-            ]),
+        const SizedBox(height: 6),
+        // 配件平常不用动, 收起来让主画面短一点
+        Theme(
+          data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+          child: ExpansionTile(
+            tilePadding: EdgeInsets.zero,
+            childrenPadding: EdgeInsets.zero,
+            title: Text('配件清单 Accessories (${s.accessories.length})', style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: navy)),
+            children: [
+              for (final a in s.accessories)
+                Padding(
+                  key: ObjectKey(a),
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(children: [
+                    Expanded(child: TextFormField(initialValue: a.name, onChanged: (v) => a.name = v, decoration: const InputDecoration(hintText: '配件名称 Accessory Name'))),
+                    const SizedBox(width: 8),
+                    SizedBox(width: 100, child: TextFormField(initialValue: a.qty, onChanged: (v) => a.qty = v, decoration: const InputDecoration(hintText: '数量 Qty'))),
+                    IconButton(tooltip: '删除 Remove', icon: const Icon(Icons.close, size: 16), onPressed: () => state.removeAccessory(a)),
+                  ]),
+                ),
+              Align(alignment: Alignment.centerLeft, child: TextButton.icon(onPressed: state.addAccessory, icon: const Icon(Icons.add, size: 16), label: const Text('添加配件 Add Accessory'))),
+            ],
           ),
-        TextButton.icon(onPressed: state.addAccessory, icon: const Icon(Icons.add, size: 16), label: const Text('添加配件 Add Accessory')),
+        ),
       ]),
     );
   }
@@ -189,8 +211,10 @@ class _ItemsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     Widget head(String t, {double? w}) => SizedBox(width: w, child: Text(t, style: const TextStyle(fontSize: 11, color: textSecondary, fontWeight: FontWeight.w600)));
     return SectionCard(
-      title: '① 物品清单 Item List',
+      step: 1,
+      title: '物品清单 Item List',
       hint: '输入总数量与每箱数量，系统自动换算箱数 — Enter total PCS & PCS/box, boxes are auto-calculated',
+      trailing: TextButton.icon(key: const ValueKey('loadSample'), onPressed: state.loadSample, icon: const Icon(Icons.auto_awesome, size: 16, color: orangeDark), label: const Text('试用示例 Try Sample', style: TextStyle(color: orangeDark, fontSize: 12))),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         LayoutBuilder(builder: (context, box) {
           final minW = box.maxWidth < 960 ? 960.0 : box.maxWidth;
@@ -304,8 +328,9 @@ class _PresetsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) => SectionCard(
-        title: '② 集装箱尺寸设置 Container Presets',
-        hint: '勾选本次计算允许使用的柜型 — Tick the container sizes allowed for this calculation',
+        step: 2,
+        title: '选择柜型 Container Sizes',
+        hint: '勾选本次可以用的柜型，系统自动挑最省的组合 — Tick allowed sizes, the cheapest mix is chosen automatically',
         child: state.presetsLoading && state.presets.isEmpty
             ? const Text('正在载入柜型预设... Loading presets...', style: TextStyle(color: textSecondary))
             : Wrap(spacing: 10, runSpacing: 10, crossAxisAlignment: WrapCrossAlignment.center, children: [

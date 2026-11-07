@@ -94,7 +94,30 @@ const _faceDefs = <(Vec3, List<(int, int, int)>)>[
 /// 该货柜里最多可见多边形数 (测试/性能评估用)
 int lastPolygonCount = 0;
 
-/// focus: 只高亮某个区块 (其余淡化, 混装柜的「各物品区块特写」用); labels: 是否画角落数字
+/// 装柜进度视图: 已装的箱子呈灰色, 正在装的这一列用物品颜色高亮, 还没装的不画 (货柜是从柜底往柜门装的)
+class LoadView {
+  const LoadView(this.allocIndex, this.column);
+  final int allocIndex, column;
+
+  // 0 = 还没装, 1 = 已装, 2 = 正在装
+  int stateOf(int alloc, int col) {
+    if (alloc > allocIndex) return 1;
+    if (alloc < allocIndex) return 0;
+    if (col > column) return 1;
+    return col == column ? 2 : 0;
+  }
+}
+
+int _muted(int argb) {
+  // 往浅灰混合: 已装好的货退到背景, 视线集中在正在装的那一列
+  int mix(int v, int g) => (v * 0.3 + g * 0.7).round();
+  return 0xFF000000 | (mix((argb >> 16) & 0xFF, 0xB8) << 16) | (mix((argb >> 8) & 0xFF, 0xC2) << 8) | mix(argb & 0xFF, 0xCC);
+}
+
+/// 工人站在柜门往里看的视角
+IsoCamera doorCamera(ContainerResult c) => IsoCamera(const Vec3(-0.75, 0.5, 0.5));
+
+/// focus: 只高亮某个区块 (其余淡化, 混装柜的「各物品区块特写」用); labels: 是否画角落数字; load: 装柜进度
 DrawList renderIso(
   ContainerResult c,
   IsoCamera cam, {
@@ -103,6 +126,8 @@ DrawList renderIso(
   int? focus,
   bool labels = true,
   bool background = true,
+  LoadView? load,
+  double xShift = 0, // 把所有货物沿柜长往柜底方向平移 (cm)
 }) {
   final out = DrawList(w, h);
   if (background) out.rect(0, 0, w, h, fill: 0xFFF5F7FA);
@@ -170,7 +195,7 @@ DrawList renderIso(
   final blocks = <_Block>[];
   for (var i = 0; i < c.allocations.length; i++) {
     final a = c.allocations[i];
-    blocks.add(_Block(a, i, -L / 2 + a.startLength, -a.blockWidth / 2));
+    blocks.add(_Block(a, i, -L / 2 + a.startLength + xShift, -a.blockWidth / 2));
   }
   double blockDepth(_Block b) {
     final a = b.alloc;
@@ -181,7 +206,7 @@ DrawList renderIso(
   var polyCount = 0;
   for (final b in blocks) {
     final faded = focus != null && b.index != focus;
-    final faces = _shellFaces(b, bs, proj, depthOf, faded);
+    final faces = _shellFaces(b, bs, proj, depthOf, faded, load);
     faces.sort((p, q) => p.depth.compareTo(q.depth));
     for (final f in faces) {
       out.cmds.add(Poly(f.pts, fill: f.fill, stroke: f.stroke, strokeWidth: 0.6));
@@ -210,7 +235,7 @@ DrawList renderIso(
   return out;
 }
 
-List<_Face> _shellFaces(_Block b, _Basis bs, Pt Function(Vec3) proj, double Function(Vec3) depthOf, bool faded) {
+List<_Face> _shellFaces(_Block b, _Basis bs, Pt Function(Vec3) proj, double Function(Vec3) depthOf, bool faded, LoadView? load) {
   final a = b.alloc;
   final C = a.columns, V = a.vertical, hCount = a.horizontal;
   final count = math.min(a.boxesPlaced, a.fullGrid);
@@ -223,12 +248,17 @@ List<_Face> _shellFaces(_Block b, _Basis bs, Pt Function(Vec3) proj, double Func
   }
   bool occupied(int c, int v, int h) {
     if (c < 0 || v < 0 || h < 0 || c >= C || v >= V || h >= hCount) return false;
+    if (load != null && load.stateOf(b.index, c) == 0) return false;
     return c * (V * hCount) + v * hCount + h < count;
   }
 
   final faces = <_Face>[];
   final base = faded ? withAlpha(a.color, 0.08) : a.color;
   for (var c = 0; c < C; c++) {
+    final st = load?.stateOf(b.index, c);
+    if (st == 0) continue;
+    final cellBase = st == 1 ? _muted(a.color) : base;
+    final edge = st == 2 ? 0xCC000000 : (faded ? null : 0x40000000);
     for (var v = 0; v < V; v++) {
       for (var h = 0; h < hCount; h++) {
         final idx = c * (V * hCount) + v * hCount + h;
@@ -245,7 +275,7 @@ List<_Face> _shellFaces(_Block b, _Basis bs, Pt Function(Vec3) proj, double Func
             dsum += depthOf(p);
           }
           final lit = (0.62 + 0.38 * math.max(0.0, n.dot(_light.unit))).toDouble();
-          faces.add(_Face(pts, dsum / 4, shade(base, lit), faded ? null : 0x40000000));
+          faces.add(_Face(pts, dsum / 4, shade(cellBase, lit), edge));
         }
       }
     }
