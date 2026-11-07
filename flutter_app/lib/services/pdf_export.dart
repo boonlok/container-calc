@@ -290,7 +290,7 @@ pw.Widget _miniHeader(UserProfile? u, String title, DateTime now) => pw.Column(c
       pw.SizedBox(height: 4 * _mm),
     ]);
 
-const _pdfQrMaxChars = 1100;
+const _pdfQrMaxChars = 900;
 
 pw.Widget _firstPage(ContainerResult c, int idx, ShipmentInfo s, UserProfile? u, pw.ImageProvider? logo, DateTime now, String? qr) {
   const gap = 6 * _mm;
@@ -395,7 +395,7 @@ pw.Widget _firstPage(ContainerResult c, int idx, ShipmentInfo s, UserProfile? u,
               child: pw.Column(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
                 if (qr != null) ...[
                   pw.Row(crossAxisAlignment: pw.CrossAxisAlignment.start, children: [
-                    pw.BarcodeWidget(barcode: Barcode.qrCode(errorCorrectLevel: BarcodeQRCorrectionLevel.low), data: qr, width: 24 * _mm, height: 24 * _mm, drawText: false),
+                    pw.BarcodeWidget(barcode: Barcode.qrCode(errorCorrectLevel: BarcodeQRCorrectionLevel.low), data: qr, width: 30 * _mm, height: 30 * _mm, drawText: false),
                     pw.SizedBox(width: 2 * _mm),
                     pw.Expanded(child: _txt('手机扫码\n照着装柜\nScan to load', style: pw.TextStyle(fontSize: 7.5, color: _navy))),
                   ]),

@@ -32,11 +32,26 @@ class _QrPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()..color = const Color(0xFF000000);
+    final paint = Paint()
+      ..color = const Color(0xFF000000)
+      ..isAntiAlias = false;
     canvas.drawRect(Offset.zero & size, Paint()..color = Colors.white);
-    final bars = Barcode.qrCode(errorCorrectLevel: BarcodeQRCorrectionLevel.low).make(data, width: size.width, height: size.height);
-    for (final e in bars) {
-      if (e is BarcodeBar && e.black) canvas.drawRect(Rect.fromLTWH(e.left, e.top, e.width + 0.5, e.height + 0.5), paint);
+    // 每个模块对齐到整数像素: 小数像素会把边缘画糊, 相机就扫不出来了
+    final bars = Barcode.qrCode(errorCorrectLevel: BarcodeQRCorrectionLevel.low)
+        .make(data, width: 1000, height: 1000)
+        .whereType<BarcodeBar>()
+        .where((b) => b.black)
+        .toList();
+    if (bars.isEmpty) return;
+    final module = bars.map((b) => b.height < b.width ? b.height : b.width).reduce((a, b) => a < b ? a : b);
+    final count = (1000 / module).round();
+    final px = (size.width / count).floorToDouble();
+    final off = ((size.width - px * count) / 2).floorToDouble();
+    for (final b in bars) {
+      canvas.drawRect(
+        Rect.fromLTWH(off + (b.left / module).round() * px, off + (b.top / module).round() * px, (b.width / module).round() * px, (b.height / module).round() * px),
+        paint,
+      );
     }
   }
 
@@ -59,7 +74,7 @@ Future<void> showWorkerShareDialog(BuildContext context, AppState state, Contain
               key: const ValueKey('workerQr'),
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(color: Colors.white, border: Border.all(color: borderColor), borderRadius: BorderRadius.circular(12)),
-              child: QrView(link, size: 240),
+              child: QrView(link, size: 300),
             )
           else
             const Text('这个货柜的物品太多，放不进二维码，请用下面的链接。 Too many items for a QR code, please share the link.', style: TextStyle(color: redErr, fontSize: 13)),
