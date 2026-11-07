@@ -1,12 +1,12 @@
 {
-    "name": "container_calc",
-    "short_name": "container_calc",
+    "name": "集装箱装载计算器 Container Loading Calculator",
+    "short_name": "装柜计算",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
-    "orientation": "portrait-primary",
+    "background_color": "#14233A",
+    "theme_color": "#14233A",
+    "description": "算出最省的柜型组合，工人手机扫码一列一列照着装。Container loading planner with a step-by-step guide for workers.",
+    "orientation": "any",
     "prefer_related_applications": false,
     "icons": [
         {
