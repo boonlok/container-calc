@@ -1,0 +1,575 @@
+<script>
+/* ============================================================
+   帐号系统 Authentication & User Management (Client-side)
+   ============================================================
+   负责: 登入/注册画面切换、session token 存取 (localStorage)、
+         个人资料编辑 (含 Logo 上传压缩)、管理后台 (Admin Dashboard)
+   ============================================================ */
+
+const AUTH_TOKEN_KEY = 'containerCalcAuthToken';
+
+// ============================================================
+//  暂时跳过登入 TEMPORARY: Skip Login Screen (Dev Mode)
+// ============================================================
+//  设为 true 时，完全不会显示登入/注册画面，也不会呼叫后端验证 —
+//  直接用一个本地「访客」身份进入主程序。
+//
+//  注意: 这个访客身份没有真正的后端 token，所以后端函式里有做
+//  requireAuth_/requireAdmin_ 检查的功能 (我的资料、修改密码、
+//  管理后台相关) 呼叫时会失败/报错。物品清单、集装箱设置、计算、
+//  储存/读取计算记录 这些核心功能不需要身份验证，可以正常使用。
+//
+//  用完请务必改回 false，恢复正常登入流程。
+// ============================================================
+const DEV_SKIP_LOGIN = false;
+
+function setCurrentUser(user, token) {
+  AppState.currentUser = user;
+  AppState.authToken = token;
+  if (token) localStorage.setItem(AUTH_TOKEN_KEY, token);
+}
+
+function clearCurrentUser() {
+  AppState.currentUser = null;
+  AppState.authToken = null;
+  localStorage.removeItem(AUTH_TOKEN_KEY);
+  // Supabase 版: 同时清掉 Supabase 自己存的登录 session (Apps Script 版没有这些对象, 直接略过)
+  try {
+    if (window.sb && window.sb.auth) window.sb.auth.signOut({ scope: 'local' });
+    if (window.__clearAuthStorage) window.__clearAuthStorage();
+  } catch (e) { /* 忽略 */ }
+}
+
+// ---------- 画面切换 ----------
+function showAuthScreen() {
+  hideBootOverlay();
+  try {
+    const flash = sessionStorage.getItem('containerCalcFlash');
+    if (flash) { sessionStorage.removeItem('containerCalcFlash'); authShowInfo(flash); }
+  } catch (e) { /* 忽略 */ }
+  const auth = document.getElementById('authScreen');
+  const main = document.getElementById('mainApp');
+  fadeSwitchScreen(main, auth, 'flex');
+}
+
+function showMainApp(user) {
+  if (user) {
+    AppState.currentUser = user;
+  }
+  const currentUser = AppState.currentUser;
+  if (!currentUser) {
+    console.error("无法加载主程序：AppState.currentUser 为空");
+    alert("登录状态异常，请重新登录");
+    hideBootOverlay(); // 隐藏加载层，避免卡死在加载画面
+    return;
+  }
+  hideBootOverlay();
+  const auth = document.getElementById('authScreen');
+  const main = document.getElementById('mainApp');
+  fadeSwitchScreen(auth, main, 'block');
+  const topbarEmail = document.getElementById('topbarUserEmail');
+  if (topbarEmail) {
+    topbarEmail.textContent = currentUser['Email'] || currentUser['email'] || '';
+  }
+  const adminBtn = document.getElementById('adminDashBtn');
+  if (adminBtn) {
+    adminBtn.style.display = (currentUser['Role'] === 'admin') ? 'inline-block' : 'none';
+  }
+  if (typeof initMainApp === 'function') {
+    initMainApp();
+  }
+}
+
+function authShowError(msg) {
+  const el = document.getElementById('authError');
+  el.textContent = msg;
+  el.style.display = 'block';
+  document.getElementById('authInfo').style.display = 'none';
+}
+function authShowInfo(msg) {
+  const el = document.getElementById('authInfo');
+  el.textContent = msg;
+  el.style.display = 'block';
+  document.getElementById('authError').style.display = 'none';
+}
+function authClearMessages() {
+  document.getElementById('authError').style.display = 'none';
+  document.getElementById('authInfo').style.display = 'none';
+}
+
+// ---------- 登入 / 注册 ----------
+function handleLogin() {
+  const email = document.getElementById('loginEmail').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  authClearMessages();
+  if (!email || !password) { authShowError('请输入邮箱与密码 Please enter email and password'); return; }
+
+  const btn = document.getElementById('loginBtn');
+  btn.disabled = true; btn.textContent = '登入中... Logging in...';
+
+  google.script.run
+    .withSuccessHandler(function (result) {
+      btn.disabled = false; btn.textContent = '登入 Log In';
+      
+      // ✅ 校验后端返回的状态
+      if (result && result.success) {
+        setCurrentUser(result.user, result.token);
+        // 传递 result.user 给 showMainApp，避免出现 reading 'Email' 错误
+        showStatusFlash({ icon: '✓', text: 'ACCESS GRANTED', duration: 750, callback: function() { showMainApp(result.user); } });
+      } else {
+        // 后端业务失败（如密码错误、账号未激活）
+        authShowError(result?.message || '登录失败 Login failed');
+      }
+    })
+    .withFailureHandler(function (err) {
+      btn.disabled = false; btn.textContent = '登入 Log In';
+      authShowError(err.message || String(err));
+    })
+    .loginUser(email, password);
+}
+
+function handleRegister() {
+  const email = document.getElementById('regEmail').value.trim();
+  const password = document.getElementById('regPassword').value;
+  const companyName = document.getElementById('regCompanyName').value.trim();
+  const companyAddress = document.getElementById('regCompanyAddress').value.trim();
+  authClearMessages();
+  if (!email || !password) { authShowError('请输入邮箱与密码 Please enter email and password'); return; }
+
+  const btn = document.getElementById('registerBtn');
+  btn.disabled = true; btn.textContent = '注册中... Registering...';
+
+  google.script.run
+    .withSuccessHandler(function (result) {
+      btn.disabled = false; btn.textContent = '注册 Register';
+      
+      // ✅ 判空与成功校验
+      if (result && result.success) {
+        if (result.isFirstUser) {
+          // 第一个帐号 (admin) 已自动启用 → 注册完直接登入，不必再输入一次
+          authShowInfo('注册成功，正在自动登入... Registered, logging you in...');
+          autoLoginAfterRegister_(email, password);
+        } else {
+          // 之后注册的帐号需 admin 启用才能登入，所以不能自动登入
+          authShowInfo(result.message || '注册成功，请等待管理员启用此帐号 Registered — awaiting admin approval');
+          document.getElementById('loginEmail').value = email;
+          toggleAuthForm('login');
+          authShowInfo(result.message || '注册成功，请等待管理员启用此帐号 Registered — awaiting admin approval');
+        }
+      } else {
+        authShowError(result?.message || '注册失败 Registration failed');
+      }
+    })
+    .withFailureHandler(function (err) {
+      btn.disabled = false; btn.textContent = '注册 Register';
+      authShowError(err.message || String(err));
+    })
+    .registerUser(email, password, companyName, companyAddress);
+}
+
+// 注册成功后用刚输入的帐号密码直接呼叫 loginUser，流程与手动登入一致
+function autoLoginAfterRegister_(email, password) {
+  google.script.run
+    .withSuccessHandler(function (result) {
+      if (result && result.success) {
+        setCurrentUser(result.user, result.token);
+        showStatusFlash({ icon: '✓', text: 'ACCESS GRANTED', duration: 750, callback: function () { showMainApp(result.user); } });
+      } else {
+        document.getElementById('loginEmail').value = email;
+        toggleAuthForm('login');
+        authShowError((result && result.message) || '自动登入失败，请手动登入 Auto-login failed, please log in manually');
+      }
+    })
+    .withFailureHandler(function (err) {
+      document.getElementById('loginEmail').value = email;
+      toggleAuthForm('login');
+      authShowError(err.message || String(err));
+    })
+    .loginUser(email, password);
+}
+
+function toggleAuthForm(which) {
+  authClearMessages();
+  document.getElementById('loginForm').style.display = which === 'login' ? 'block' : 'none';
+  document.getElementById('registerForm').style.display = which === 'register' ? 'block' : 'none';
+  document.getElementById('forgotForm').style.display = which === 'forgot' ? 'block' : 'none';
+}
+
+// ---------- 忘记密码 ----------
+function handleForgotSend() {
+  const email = document.getElementById('forgotEmail').value.trim();
+  authClearMessages();
+  if (!email) { authShowError('请输入邮箱 Please enter your email'); return; }
+  const btn = document.getElementById('forgotSendBtn');
+  btn.disabled = true;
+  google.script.run
+    .withSuccessHandler(function (res) { btn.disabled = false; authShowInfo((res && res.message) || '验证码已寄出 Code sent'); })
+    .withFailureHandler(function (err) { btn.disabled = false; authShowError(err.message || String(err)); })
+    .requestPasswordReset(email);
+}
+
+function handleForgotReset() {
+  const email = document.getElementById('forgotEmail').value.trim();
+  const code = document.getElementById('forgotCode').value.trim();
+  const pw = document.getElementById('forgotNewPw').value;
+  authClearMessages();
+  if (!email || !code || !pw) { authShowError('请填写邮箱、验证码与新密码 Email, code and new password are required'); return; }
+  const btn = document.getElementById('forgotResetBtn');
+  btn.disabled = true;
+  google.script.run
+    .withSuccessHandler(function (res) {
+      btn.disabled = false;
+      document.getElementById('loginEmail').value = email;
+      document.getElementById('forgotCode').value = '';
+      document.getElementById('forgotNewPw').value = '';
+      toggleAuthForm('login');
+      authShowInfo((res && res.message) || '密码已重设 Password reset');
+    })
+    .withFailureHandler(function (err) { btn.disabled = false; authShowError(err.message || String(err)); })
+    .resetPasswordWithCode(email, code, pw);
+}
+
+function logout() {
+  showStatusFlash({
+    icon: '⏻', text: 'SESSION TERMINATED', duration: 650, error: true,
+    callback: function () {
+      resetAndReload('已登出 Logged out');
+    },
+  });
+}
+
+// 登出/被强制登出时清掉所有画面与内存中的资料 (物品、结果、该帐号的柜型、货运信息),
+// 最可靠的做法是直接重新载入页面, 避免下一个登入的帐号看到上一个帐号的内容。
+function resetAndReload(message) {
+  clearCurrentUser();
+  try { if (message) sessionStorage.setItem('containerCalcFlash', message); } catch (e) { /* 忽略 */ }
+  location.reload();
+}
+
+// 开发用: 不呼叫后端，直接用访客身份进主程序 (见上方 DEV_SKIP_LOGIN 开关)
+function devAutoLogin_() {
+  const guestUser = { Email: 'DEMO', Role: 'user' };
+  AppState.currentUser = guestUser;
+  AppState.authToken = null; // 没有真正的 token；需要身份验证的后端函式会失败，属预期行为
+  showMainApp(guestUser);
+}
+
+// 页面载入时检查是否已有有效登入 (localStorage 存的 token)
+function checkExistingSession() {
+  if (DEV_SKIP_LOGIN) { devAutoLogin_(); return; }
+
+  const token = localStorage.getItem(AUTH_TOKEN_KEY);
+  if (!token) { showAuthScreen(); return; }
+
+  google.script.run
+    .withSuccessHandler(function (res) {
+      // 兼容后端直接返回 user 对象或返回 { success: true, user: ... } 的情况
+      const user = (res && res.user) ? res.user : res;
+      const isSuccess = res && res.success !== false && user && (user.Email || user.email);
+
+      if (isSuccess) {
+        setCurrentUser(user, token);
+        showMainApp(user);
+      } else {
+        clearCurrentUser();
+        showAuthScreen();
+      }
+    })
+    .withFailureHandler(function () {
+      clearCurrentUser();
+      showAuthScreen();
+    })
+    .getMyProfile(token);
+}
+
+// ============================================================
+//  我的资料 My Profile
+// ============================================================
+function openMyProfile() {
+  const panel = document.getElementById('profileScreen');
+  panel.style.display = 'block';
+  panel.classList.remove('screen-fade-out');
+  panel.classList.add('screen-fade-in');
+  setTimeout(function () { panel.classList.remove('screen-fade-in'); }, 320);
+  document.getElementById('profileEmail').value = AppState.currentUser['Email'];
+  document.getElementById('profileCompanyName').value = AppState.currentUser['CompanyName'] || '';
+  document.getElementById('profileCompanyAddress').value = AppState.currentUser['CompanyAddress'] || '';
+  setLogoPreview(AppState.currentUser['LogoDataUrl'] || '');
+  document.getElementById('profileOldPassword').value = '';
+  document.getElementById('profileNewPassword').value = '';
+}
+
+function closeMyProfile() {
+  const panel = document.getElementById('profileScreen');
+  panel.classList.add('screen-fade-out');
+  setTimeout(function () { panel.style.display = 'none'; panel.classList.remove('screen-fade-out'); }, 180);
+}
+
+function setLogoPreview(dataUrl) {
+  const img = document.getElementById('profileLogoPreview');
+  const removeBtn = document.getElementById('profileLogoRemove');
+  if (dataUrl) {
+    img.src = dataUrl; img.style.display = 'inline-block'; removeBtn.style.display = 'inline-flex';
+  } else {
+    img.src = ''; img.style.display = 'none'; removeBtn.style.display = 'none';
+  }
+  img.dataset.value = dataUrl || '';
+}
+
+// 把上传的图档缩小/压缩后转成 base64，避免 Logo 档案过大塞不进 Google Sheet 儲存格
+function resizeImageFile(file, maxDim, callback) {
+  const reader = new FileReader();
+  reader.onload = function (e) {
+    const img = new Image();
+    img.onload = function () {
+      let w = img.width, h = img.height;
+      if (w > maxDim || h > maxDim) {
+        if (w > h) { h = Math.round(h * maxDim / w); w = maxDim; }
+        else { w = Math.round(w * maxDim / h); h = maxDim; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w; canvas.height = h;
+      canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+      // 服务器单格上限约 50000 字元: 先试 PNG (保留透明), 太大就缩小尺寸再试, 最后才改 JPEG (先铺白底, 否则透明处会变黑)
+      const LIMIT = 45000;
+      let dataUrl = canvas.toDataURL('image/png');
+      let cw = w, ch = h;
+      while (dataUrl.length > LIMIT && cw > 60) {
+        cw = Math.round(cw * 0.8); ch = Math.round(ch * 0.8);
+        canvas.width = cw; canvas.height = ch;
+        canvas.getContext('2d').drawImage(img, 0, 0, cw, ch);
+        dataUrl = canvas.toDataURL('image/png');
+        if (dataUrl.length <= LIMIT) break;
+        const jc = document.createElement('canvas');
+        jc.width = cw; jc.height = ch;
+        const jx = jc.getContext('2d');
+        jx.fillStyle = '#fff'; jx.fillRect(0, 0, cw, ch);
+        jx.drawImage(img, 0, 0, cw, ch);
+        const jpg = jc.toDataURL('image/jpeg', 0.82);
+        if (jpg.length <= LIMIT) { dataUrl = jpg; break; }
+      }
+      callback(dataUrl);
+    };
+    img.onerror = function () { if (typeof showToast === 'function') showToast('图片读取失败 Failed to read image', true); };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function saveMyProfile() {
+  const data = {
+    companyName: document.getElementById('profileCompanyName').value.trim(),
+    companyAddress: document.getElementById('profileCompanyAddress').value.trim(),
+    logoDataUrl: document.getElementById('profileLogoPreview').dataset.value || '',
+  };
+  const btn = document.getElementById('profileSaveBtn');
+  btn.disabled = true;
+
+  google.script.run
+    .withSuccessHandler(function (res) {
+      btn.disabled = false;
+      if (res && res.success !== false) {
+        const updatedUser = res.user || res;
+        AppState.currentUser = updatedUser;
+        showToast('资料已保存 Profile saved ✓');
+      } else {
+        showToast(res?.message || '保存失败 Save failed', true);
+      }
+    })
+    .withFailureHandler(function (err) { btn.disabled = false; handleServerError(err); })
+    .updateMyProfile(AppState.authToken, data);
+}
+
+function changeMyPasswordHandler() {
+  const oldPw = document.getElementById('profileOldPassword').value;
+  const newPw = document.getElementById('profileNewPassword').value;
+  if (!oldPw || !newPw) { showToast('请填写目前密码与新密码 Please fill in both password fields', true); return; }
+
+  const btn = document.getElementById('profileChangePwBtn');
+  btn.disabled = true;
+
+  google.script.run
+    .withSuccessHandler(function (res) {
+      btn.disabled = false;
+      if (res && res.success !== false) {
+        showToast('密码已修改，请重新登入 Password changed, please log in again');
+        setTimeout(logout, 1200);
+      } else {
+        showToast(res?.message || '修改密码失败 Failed to change password', true);
+      }
+    })
+    .withFailureHandler(function (err) { btn.disabled = false; handleServerError(err); })
+    .changeMyPassword(AppState.authToken, oldPw, newPw);
+}
+
+// ============================================================
+//  管理后台 Admin Dashboard
+// ============================================================
+function openAdminDashboard() {
+  const panel = document.getElementById('adminScreen');
+  panel.style.display = 'block';
+  panel.classList.remove('screen-fade-out');
+  panel.classList.add('screen-fade-in');
+  setTimeout(function () { panel.classList.remove('screen-fade-in'); }, 320);
+  loadAllUsersForAdmin();
+}
+
+function closeAdminDashboard() {
+  const panel = document.getElementById('adminScreen');
+  panel.classList.add('screen-fade-out');
+  setTimeout(function () { panel.style.display = 'none'; panel.classList.remove('screen-fade-out'); }, 180);
+}
+
+function loadAllUsersForAdmin() {
+  const list = document.getElementById('adminUserList');
+  list.innerHTML = '<div class="hint">载入中... Loading...</div>';
+
+  google.script.run
+    .withSuccessHandler(function (res) {
+      const users = (res && res.users) ? res.users : res;
+      if (Array.isArray(users)) {
+        AppState.adminUsers = users;
+        document.getElementById('adminUserCount').textContent = users.length;
+        renderAdminUserList(users);
+      } else {
+        handleServerError(res?.message || '无法获取用户列表');
+      }
+    })
+    .withFailureHandler(handleServerError)
+    .getAllUsers(AppState.authToken);
+}
+
+function renderAdminUserList(users) {
+  const list = document.getElementById('adminUserList');
+  if (users.length === 0) { list.innerHTML = '<div class="hint">尚无帐号 No accounts yet</div>'; return; }
+
+  list.innerHTML = users.map(u => `
+    <div class="admin-user-card">
+      <div class="u-email">${escapeHtml(u['Email'])}${u['Email'] === AppState.currentUser['Email'] ? ' <span class="hint-inline">(you)</span>' : ''}</div>
+      <div class="u-company">${u['CompanyName'] ? escapeHtml(u['CompanyName']) : '<span class="hint-inline">未设定 not set</span>'}</div>
+      <span class="u-badge role-${u['Role']}">${escapeHtml(String(u['Role']).toUpperCase())}</span>
+      <span class="u-badge status-${u['Status']}">${escapeHtml(String(u['Status']).toUpperCase())}</span>
+      <div class="u-actions">
+        <button class="btn btn-ghost" data-edit-user="${escapeAttr(u['Email'])}">编辑 Edit</button>
+      </div>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('[data-edit-user]').forEach(btn => {
+    btn.addEventListener('click', function () { openUserEditModal(this.dataset.editUser); });
+  });
+}
+
+function openUserEditModal(email) {
+  const u = AppState.adminUsers.find(x => x['Email'] === email);
+  if (!u) return;
+  document.getElementById('userEditModal').dataset.email = email;
+  document.getElementById('uModalEmail').value = u['Email'];
+  document.getElementById('uModalCompanyName').value = u['CompanyName'] || '';
+  document.getElementById('uModalCompanyAddress').value = u['CompanyAddress'] || '';
+  document.getElementById('uModalRole').value = u['Role'];
+  document.getElementById('uModalStatus').value = u['Status'];
+  document.getElementById('uModalNewPassword').value = '';
+  document.getElementById('userEditModal').classList.add('show');
+}
+
+function closeUserEditModal() {
+  document.getElementById('userEditModal').classList.remove('show');
+}
+
+function saveUserEditModal() {
+  const email = document.getElementById('userEditModal').dataset.email;
+  const data = {
+    companyName: document.getElementById('uModalCompanyName').value.trim(),
+    companyAddress: document.getElementById('uModalCompanyAddress').value.trim(),
+    role: document.getElementById('uModalRole').value,
+    status: document.getElementById('uModalStatus').value,
+  };
+  const newPassword = document.getElementById('uModalNewPassword').value;
+
+  const btn = document.getElementById('uModalSave');
+  btn.disabled = true;
+
+  function afterUpdate(res) {
+    const users = (res && res.users) ? res.users : res;
+    if (Array.isArray(users)) {
+      AppState.adminUsers = users;
+      renderAdminUserList(users);
+      closeUserEditModal();
+      btn.disabled = false;
+      showToast('帐号已更新 Account updated ✓');
+    } else {
+      btn.disabled = false;
+      showToast(res?.message || '更新失败 Update failed', true);
+    }
+  }
+
+  google.script.run
+    .withSuccessHandler(function (res) {
+      if (res && res.success === false) {
+        btn.disabled = false;
+        showToast(res.message || '更新失败', true);
+        return;
+      }
+
+      if (newPassword) {
+        if (newPassword.length < 6) { 
+          btn.disabled = false; 
+          showToast('新密码至少需要 6 个字元 New password must be at least 6 characters', true); 
+          return; 
+        }
+        google.script.run
+          .withSuccessHandler(function (pwRes) { 
+            if (pwRes && pwRes.success === false) {
+              btn.disabled = false;
+              showToast(pwRes.message || '重置密码失败', true);
+            } else {
+              afterUpdate(res); 
+            }
+          })
+          .withFailureHandler(function (err) { btn.disabled = false; handleServerError(err); })
+          .adminResetPassword(AppState.authToken, email, newPassword);
+      } else {
+        afterUpdate(res);
+      }
+    })
+    .withFailureHandler(function (err) { btn.disabled = false; handleServerError(err); })
+    .adminUpdateUser(AppState.authToken, email, data);
+}
+
+// ============================================================
+//  初始化 Init (Auth 相关的 DOM 绑定)
+// ============================================================
+window.addEventListener('DOMContentLoaded', function () {
+  runBootSequence(checkExistingSession);
+
+  document.getElementById('loginBtn').addEventListener('click', handleLogin);
+  document.getElementById('registerBtn').addEventListener('click', handleRegister);
+  document.getElementById('showRegisterLink').addEventListener('click', function (e) { e.preventDefault(); toggleAuthForm('register'); });
+  document.getElementById('showForgotLink').addEventListener('click', function (e) { e.preventDefault(); toggleAuthForm('forgot'); });
+  document.getElementById('forgotBackLink').addEventListener('click', function (e) { e.preventDefault(); toggleAuthForm('login'); });
+  document.getElementById('forgotSendBtn').addEventListener('click', handleForgotSend);
+  document.getElementById('forgotResetBtn').addEventListener('click', handleForgotReset);
+  document.getElementById('showLoginLink').addEventListener('click', function (e) { e.preventDefault(); toggleAuthForm('login'); });
+  ['loginEmail', 'loginPassword'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', function (e) { if (e.key === 'Enter') handleLogin(); });
+  });
+
+  document.getElementById('logoutBtn').addEventListener('click', logout);
+  document.getElementById('myProfileBtn').addEventListener('click', openMyProfile);
+  document.getElementById('profileBackBtn').addEventListener('click', closeMyProfile);
+  document.getElementById('profileSaveBtn').addEventListener('click', saveMyProfile);
+  document.getElementById('profileChangePwBtn').addEventListener('click', changeMyPasswordHandler);
+  document.getElementById('profileLogoInput').addEventListener('change', function () {
+    if (!this.files || !this.files[0]) return;
+    resizeImageFile(this.files[0], 300, setLogoPreview);
+  });
+  document.getElementById('profileLogoRemove').addEventListener('click', function () { setLogoPreview(''); });
+
+  document.getElementById('adminDashBtn').addEventListener('click', openAdminDashboard);
+  document.getElementById('adminBackBtn').addEventListener('click', closeAdminDashboard);
+  document.getElementById('uModalCancel').addEventListener('click', closeUserEditModal);
+  document.getElementById('uModalSave').addEventListener('click', saveUserEditModal);
+  document.getElementById('userEditModal').addEventListener('click', function (e) { if (e.target === this) closeUserEditModal(); });
+});
+</script>

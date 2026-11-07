@@ -1,0 +1,702 @@
+<script>
+/* ============================================================
+   3D 与 2D 视图渲染 3D & 2D Rendering (Three.js)
+   ============================================================
+   - render3DView: 每个货柜的可拖曳 3D 视图 (共用同一个 renderer,
+     切换货柜时清空场景重画，避免重复建立 WebGL context)
+   - drawFlatView: 正面 / 背面视图，用 Canvas 2D 画出该截面的
+     Horizontal × Vertical 排列网格
+   ============================================================ */
+
+let threeScene, threeCamera, threeRenderer, threeControls;
+let threeGroup;
+
+// 建立一个「数字贴牌」sprite，用来在 3D 场景的角落标示排列数量 (像参考图手绘的角落数字)
+function makeLabelSprite(text, opts) {
+  opts = opts || {};
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const fontSize = 64;
+  ctx.font = `800 ${fontSize}px "IBM Plex Sans", Arial, sans-serif`;
+  const textW = ctx.measureText(text).width;
+  const padX = 18, padY = 10;
+  canvas.width = textW + padX * 2;
+  canvas.height = fontSize + padY * 2;
+
+  ctx.font = `800 ${fontSize}px "IBM Plex Sans", Arial, sans-serif`;
+  ctx.fillStyle = opts.bg || 'rgba(255,255,255,0.92)';
+  ctx.strokeStyle = opts.border || 'rgba(27,42,58,0.9)';
+  ctx.lineWidth = 4;
+  const r = 10;
+  ctx.beginPath();
+  ctx.roundRect ? ctx.roundRect(2, 2, canvas.width - 4, canvas.height - 4, r) : ctx.rect(2, 2, canvas.width - 4, canvas.height - 4);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = opts.color || '#1B2A3A';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2 + 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const material = new THREE.SpriteMaterial({ map: texture, depthTest: false, depthWrite: false, sizeAttenuation: true });
+  const sprite = new THREE.Sprite(material);
+  const scaleH = opts.scale || 24;
+  sprite.scale.set((canvas.width / canvas.height) * scaleH, scaleH, 1);
+  sprite.renderOrder = 999;
+  return sprite;
+}
+
+function ensureThreeSetup() {
+  if (threeRenderer) return;
+  if (typeof THREE === 'undefined') return;
+
+  threeScene = new THREE.Scene();
+  threeScene.background = new THREE.Color(0xF5F7FA);
+
+  threeCamera = new THREE.PerspectiveCamera(45, 1, 1, 200000);
+
+  threeRenderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+  threeRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+  threeControls = new THREE.OrbitControls(threeCamera, threeRenderer.domElement);
+  threeControls.enableDamping = true;
+  threeControls.dampingFactor = 0.08;
+  threeControls.minDistance = 30;
+  threeControls.maxDistance = 8000;
+
+  threeScene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const dir1 = new THREE.DirectionalLight(0xffffff, 0.55);
+  dir1.position.set(1, 1.6, 1);
+  threeScene.add(dir1);
+  const dir2 = new THREE.DirectionalLight(0xffffff, 0.3);
+  dir2.position.set(-1, 0.6, -1);
+  threeScene.add(dir2);
+
+  threeGroup = new THREE.Group();
+  threeScene.add(threeGroup);
+
+  // 按需渲染: 只有镜头在动 (拖曳/惯性) 或场景被改动时才画一帧, 页面隐藏或画布不在页面上时完全不画。
+  // 以前是无条件每秒 60 帧持续渲染, 物品多时会一直占满 GPU/CPU。
+  threeControls.addEventListener('change', requestThreeRender);
+  (function animate() {
+    requestAnimationFrame(animate);
+    if (document.hidden || !threeRenderer.domElement.isConnected) return;
+    const moved = threeControls.update(); // 阻尼惯性期间会持续回传 true
+    if (moved || threeNeedsRender) {
+      threeNeedsRender = false;
+      threeRenderer.render(threeScene, threeCamera);
+    }
+  })();
+}
+
+let threeNeedsRender = true;
+function requestThreeRender() { threeNeedsRender = true; }
+
+function render3DView(wrapId, containerData) {
+  const wrap = document.getElementById(wrapId);
+  if (!wrap) return;
+  if (typeof THREE === 'undefined') {
+    wrap.innerHTML = '<div style="padding:20px; font-size:12px; color:#94A3B8;">3D 引擎载入中，请稍候刷新... Loading 3D engine...</div>';
+    return;
+  }
+
+  ensureThreeSetup();
+
+  const hint = wrap.querySelector('.drag-hint');
+  wrap.innerHTML = '';
+  wrap.appendChild(threeRenderer.domElement);
+  if (hint) wrap.appendChild(hint); else {
+    const h = document.createElement('span');
+    h.className = 'drag-hint';
+    h.textContent = '🖱 拖曳旋转 · 滚轮缩放';
+    wrap.appendChild(h);
+  }
+
+  const w = wrap.clientWidth || 380;
+  const h2 = wrap.clientHeight || 300;
+  threeRenderer.setSize(w, h2);
+  threeCamera.aspect = w / h2;
+  threeCamera.updateProjectionMatrix();
+
+  // 同一个货柜的场景已经建好 (例如截图完成后还原主视图): 只重设镜头, 不必整个重建
+  if (threeGroup.userData.sceneFor === containerData) {
+    resetThreeCamera(containerData);
+    return;
+  }
+
+  disposeThreeGroup();
+  threeGroup.userData.sceneFor = containerData;
+
+  const { L, W, H, allocations } = containerData;
+
+  const contGeo = new THREE.BoxGeometry(L, H, W);
+  const contLine = new THREE.LineSegments(
+    new THREE.EdgesGeometry(contGeo),
+    new THREE.LineBasicMaterial({ color: 0x1B2A3A })
+  );
+  contLine.position.set(0, H / 2, 0);
+  threeGroup.add(contLine);
+
+  const floor = new THREE.Mesh(
+    new THREE.PlaneGeometry(L, W),
+    new THREE.MeshBasicMaterial({ color: 0xDBDFE6, side: THREE.DoubleSide, transparent: true, opacity: 0.6 })
+  );
+  floor.rotation.x = -Math.PI / 2;
+  threeGroup.add(floor);
+
+  threeGroup.userData.materialsByAlloc = {};
+  threeGroup.userData.spritesByAlloc = {};
+  allocations.forEach((alloc, allocIdx) => {
+    threeGroup.userData.materialsByAlloc[allocIdx] = addAllocationBoxes(alloc, L);
+    threeGroup.userData.spritesByAlloc[allocIdx] = addCornerLabels(alloc, L, H);
+  });
+
+  resetThreeCamera(containerData);
+}
+
+function resetThreeCamera(containerData) {
+  const { L, W, H } = containerData;
+  const diag = Math.sqrt(L * L + W * W + H * H);
+  threeCamera.position.set(diag * 0.5, diag * 0.42, diag * 0.68);
+  threeControls.target.set(0, H / 2, 0);
+  threeControls.update();
+  threeNeedsRender = true;
+  threeRenderer.render(threeScene, threeCamera); // 立即同步渲染一帧，供截图使用 (不必等下一个 requestAnimationFrame)
+}
+
+// 释放上一个货柜的所有 GPU 资源 (几何体/材质/贴图), 包含之前漏掉的 LineSegments 几何体与材质
+function disposeThreeGroup() {
+  while (threeGroup.children.length) {
+    const child = threeGroup.children[0];
+    threeGroup.remove(child);
+    if (child.geometry) child.geometry.dispose();
+    if (child.isInstancedMesh) child.dispose();
+    if (child.material) {
+      if (child.material.map) child.material.map.dispose(); // 每个数字标牌都有自己独立的 canvas 贴图
+      child.material.dispose();
+    }
+  }
+  threeGroup.userData.sceneFor = null;
+}
+
+// 在每个物品区块的角落放置数字标牌：
+//   - 区块顶部标出「直排数 Vertical count」(该区块堆几层)
+//   - 区块远端角落标出「深度列数 Columns」(该区块前后排几列)
+// 这跟参考图手绘角落数字的用意一致：一眼看出该区域的排列方式
+function addCornerLabels(alloc, containerL, containerH) {
+  const depthUnit = alloc.depthUnit;
+  const widthUnit = alloc.rotated ? alloc.boxL : alloc.boxW;
+  const boxH = alloc.boxH;
+  const startX = -containerL / 2 + alloc.startLength;
+  const blockWidth = alloc.horizontal * widthUnit;
+  const startZ = -blockWidth / 2;
+  const blockDepth = alloc.columns * depthUnit;
+  const blockHeight = alloc.vertical * boxH;
+  const labelScale = Math.max(14, Math.min(32, boxH * 0.4));
+
+  // 顶部中央：直排 (Vertical) 数量
+  const vSprite = makeLabelSprite(String(alloc.vertical), { scale: labelScale, border: alloc.color });
+  vSprite.position.set(startX + depthUnit * 0.5, blockHeight + labelScale * 0.6, startZ + blockWidth / 2);
+  threeGroup.add(vSprite);
+
+  // 远端角落：深度 (Columns) 数量，只在该区块有一定长度时才标 (太短容易跟其他标签重叠)
+  let colSprite = null;
+  if (alloc.columns >= 1) {
+    colSprite = makeLabelSprite(String(alloc.columns), { scale: labelScale, border: alloc.color });
+    colSprite.position.set(startX + blockDepth - depthUnit * 0.5, blockHeight * 0.5, startZ + blockWidth + labelScale * 0.7);
+    threeGroup.add(colSprite);
+  }
+
+  // 近端角落 (柜门/该区块起点)：横排 (Horizontal) 数量
+  const hSprite = makeLabelSprite(String(alloc.horizontal), { scale: labelScale, border: alloc.color });
+  hSprite.position.set(startX + depthUnit * 0.5, blockHeight * 0.5, startZ - labelScale * 0.7);
+  threeGroup.add(hSprite);
+  return [vSprite, hSprite, colSprite].filter(Boolean);
+}
+
+function addAllocationBoxes(alloc, containerL) {
+  const depthUnit = alloc.depthUnit;
+  const widthUnit = alloc.rotated ? alloc.boxL : alloc.boxW;
+  const boxH = alloc.boxH;
+  const startX = -containerL / 2 + alloc.startLength;
+  const blockWidth = alloc.horizontal * widthUnit;
+  const startZ = -blockWidth / 2;
+
+  const material = new THREE.MeshLambertMaterial({ color: alloc.color });
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.3 });
+
+  // 只画实际放进去的箱数 (最后一列没排满时, 以前会把整个网格画满, 和工人注意事项里的数量对不上)。
+  // 填放顺序: 逐列, 每列由下往上逐层, 每层由一侧向另一侧 —— 与注意事项「从一侧靠边排放」一致。
+  const full = alloc.columns * alloc.horizontal * alloc.vertical;
+  const count = Math.max(0, Math.min(Math.floor(alloc.boxesPlaced) || full, full));
+
+  // 一个 InstancedMesh 画完该区块所有箱子 (1 次 draw call), 边线合并成 1 个 LineSegments,
+  // 取代以前「每箱 2 个物件」的做法, 箱子再多也不会拖慢 3D。
+  const boxGeo = new THREE.BoxGeometry(depthUnit * 0.96, boxH * 0.96, widthUnit * 0.96);
+  const inst = new THREE.InstancedMesh(boxGeo, material, count);
+  inst.frustumCulled = false; // r128 的 InstancedMesh 包围球只算单一方块, 不关闭会被误剔除
+  const edgeTpl = new THREE.EdgesGeometry(boxGeo).attributes.position.array; // 12 条边 × 2 端点 × 3
+  const drawEdges = count <= 30000;
+  const edgePos = drawEdges ? new Float32Array(count * edgeTpl.length) : null;
+  const dummy = new THREE.Object3D();
+  let n = 0;
+  outer:
+  for (let c = 0; c < alloc.columns; c++) {
+    for (let v = 0; v < alloc.vertical; v++) {
+      for (let h = 0; h < alloc.horizontal; h++) {
+        if (n >= count) break outer;
+        const cx = startX + c * depthUnit + depthUnit / 2;
+        const cy = v * boxH + boxH / 2;
+        const cz = startZ + h * widthUnit + widthUnit / 2;
+        dummy.position.set(cx, cy, cz);
+        dummy.updateMatrix();
+        inst.setMatrixAt(n, dummy.matrix);
+        if (drawEdges) {
+          const off = n * edgeTpl.length;
+          for (let k = 0; k < edgeTpl.length; k += 3) {
+            edgePos[off + k] = edgeTpl[k] + cx;
+            edgePos[off + k + 1] = edgeTpl[k + 1] + cy;
+            edgePos[off + k + 2] = edgeTpl[k + 2] + cz;
+          }
+        }
+        n++;
+      }
+    }
+  }
+  inst.instanceMatrix.needsUpdate = true;
+  threeGroup.add(inst);
+  if (drawEdges) {
+    const edgeGeo = new THREE.BufferGeometry();
+    edgeGeo.setAttribute('position', new THREE.BufferAttribute(edgePos, 3));
+    const lines = new THREE.LineSegments(edgeGeo, edgeMat);
+    lines.frustumCulled = false;
+    threeGroup.add(lines);
+  }
+  return { fill: material, edge: edgeMat };
+}
+
+window.addEventListener('resize', function () {
+  if (!threeRenderer) return;
+  const wrap = document.getElementById('view3dWrap');
+  if (wrap && wrap.contains(threeRenderer.domElement)) {
+    const w = wrap.clientWidth, h = wrap.clientHeight;
+    if (w > 0 && h > 0) {
+      threeRenderer.setSize(w, h);
+      threeCamera.aspect = w / h;
+      threeCamera.updateProjectionMatrix();
+    }
+  }
+});
+
+// ============================================================
+//  侧视图 Right View (Canvas 2D)
+// ============================================================
+//  跟 front/back view 不同，Right View 是沿着「柜门→柜底」这条深度轴
+//  看过去的剖面图，X 轴＝长度(深度)，Y 轴＝高度。因为每样物品在这个
+//  轴向上本来就是依序排列、不重叠的，所以可以直接用真实资料绘制，
+//  不需要 front/back 那种「近端物品挡住、露出后方物品」的堆叠近似。
+// ============================================================
+function drawRightView(canvas, containerData, forcedW, forcedH) {
+  if (!canvas) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const displayW = forcedW || canvas.clientWidth || 380;
+  const displayH = forcedH || canvas.clientHeight || 300;
+  canvas.width = displayW * dpr;
+  canvas.height = displayH * dpr;
+  canvas.style.height = displayH + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, displayW, displayH);
+
+  const allocations = containerData.allocations;
+  if (!allocations || allocations.length === 0) {
+    ctx.fillStyle = '#94A3B8';
+    ctx.font = '12px "IBM Plex Sans", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('无数据 No data', displayW / 2, displayH / 2);
+    return;
+  }
+
+  const contL = containerData.L, contH = containerData.H;
+  const padTop = 22, padBottom = 16, padSide = 40;
+  const availW = displayW - padSide * 2;
+  const availH = displayH - padTop - padBottom;
+  const scale = Math.min(availW / contL, availH / contH);
+  const drawW = contL * scale, drawH = contH * scale;
+  const offsetX = (displayW - drawW) / 2;
+  const offsetY = padTop;
+
+  ctx.fillStyle = '#F5F7FA';
+  ctx.fillRect(offsetX, offsetY, drawW, drawH);
+
+  allocations.forEach(alloc => {
+    const blockX = offsetX + alloc.startLength * scale;
+    const blockW = alloc.lengthUsed * scale;
+    const blockH = alloc.vertical * alloc.boxH * scale;
+    const blockY = offsetY + drawH - blockH;
+    const colW = blockW / alloc.columns;
+    const rowH = alloc.boxH * scale;
+
+    for (let col = 0; col < alloc.columns; col++) {
+      for (let row = 0; row < alloc.vertical; row++) {
+        const x = blockX + col * colW;
+        const y = blockY + (alloc.vertical - 1 - row) * rowH;
+        ctx.fillStyle = alloc.color;
+        ctx.globalAlpha = 0.88;
+        ctx.fillRect(x + 1, y + 1, Math.max(colW - 2, 0), Math.max(rowH - 2, 0));
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(Math.round(x) + 0.5, Math.round(y) + 0.5, colW, rowH);
+      }
+    }
+
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(blockX, blockY, blockW, blockH);
+
+    // 角落数字：区块顶部置中标「直排 V」，右下角标「深度列数 columns」(呼应 3D 模型上的角落标牌)
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const cornerFont = Math.min(15, Math.max(9, Math.floor(blockH / 4)));
+    if (blockH >= 16) {
+      drawCornerBadge(ctx, blockX + blockW / 2, blockY - 9, String(alloc.vertical), cornerFont, alloc.color);
+    }
+    if (blockW >= 16) {
+      drawCornerBadge(ctx, blockX + blockW - 12, blockY + blockH - 10, String(alloc.columns), cornerFont, alloc.color);
+    }
+  });
+
+  ctx.textBaseline = 'alphabetic';
+  ctx.strokeStyle = '#1B2A3A';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(offsetX, offsetY, drawW, drawH);
+
+  ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = '#64748B';
+  ctx.save();
+  ctx.translate(offsetX - 8, offsetY + drawH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.fillText(contH + ' cm', 0, 0);
+  ctx.restore();
+  ctx.textAlign = 'center';
+  ctx.fillText(contL + ' cm', displayW / 2, offsetY - 8);
+}
+
+// 小圆角数字徽章，白底 + 产品色边框，贴在区块角落 (2D 版本的「角落数字」，跟 3D 模型上的贴牌呼应)
+function drawCornerBadge(ctx, cx, cy, text, fontSize, borderColor) {
+  ctx.font = `800 ${fontSize}px "IBM Plex Sans", sans-serif`;
+  const w = ctx.measureText(text).width + 8;
+  const h = fontSize + 6;
+  ctx.fillStyle = 'rgba(255,255,255,0.92)';
+  ctx.strokeStyle = borderColor;
+  ctx.lineWidth = 1.5;
+  const rx = cx - w / 2, ry = cy - h / 2, r = 4;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(rx, ry, w, h, r); else ctx.rect(rx, ry, w, h);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = '#1B2A3A';
+  ctx.fillText(text, cx, cy + 1);
+}
+
+// ============================================================
+//  多角度视角合集 View Points Gallery
+// ============================================================
+//  在隐藏的离屏容器里，把同一个货柜从几个固定角度分别拍成静态截图，
+//  拍完后会把主视图 (view3dWrap) 的镜头还原，不影响使用者原本正在
+//  互动操作的那个 3D 视图。
+// ============================================================
+// ------------------------------------------------------------
+//  区块作业说明 Section Worker Notes
+// ------------------------------------------------------------
+//  约定: startLength = 该区块离「柜门端」的距离 (cm)。第 1 区块最靠近柜门，
+//  最后一个区块在柜底。Front View 从柜门端看，Back View 从柜底端看。
+//  回传的 notes 是给装柜工人的注意事项，画面 (Render) 与 PDF (Export) 共用。
+// ------------------------------------------------------------
+function describeAllocation(alloc, containerData, idx) {
+  const allocs = containerData.allocations;
+  const widthUnit = alloc.rotated ? alloc.boxL : alloc.boxW;
+  const blockWidth = alloc.horizontal * widthUnit;
+  const blockHeight = alloc.vertical * alloc.boxH;
+  const pcsPerBox = alloc.pcsPerBox || Math.round(alloc.pcsPlaced / Math.max(alloc.boxesPlaced, 1)) || 0;
+  const weightKg = (alloc.boxWeight || 0) * alloc.boxesPlaced;
+  const endLength = round2(alloc.startLength + alloc.lengthUsed);
+  const sideGap = round2(containerData.W - blockWidth);
+  const topGap = round2(containerData.H - blockHeight);
+  const next = allocs[idx + 1], prev = allocs[idx - 1];
+  const notes = [];
+
+  notes.push(alloc.rotated
+    ? '箱子横放旋转 90°: 箱长 ' + alloc.boxL + ' cm 朝柜宽方向，箱宽 ' + alloc.boxW + ' cm 朝柜深方向 Rotated 90°'
+    : '箱子正放: 箱宽 ' + alloc.boxW + ' cm 朝柜宽方向，箱长 ' + alloc.boxL + ' cm 朝柜深方向 Standard orientation');
+  notes.push('每层横排 ' + alloc.horizontal + ' 箱 × 直排 ' + alloc.vertical + ' 层，前后共 ' + alloc.columns + ' 列 (' + alloc.horizontal + '×' + alloc.vertical + '×' + alloc.columns + ')');
+  notes.push('起点离柜门 ' + alloc.startLength + ' cm，终点 ' + endLength + ' cm，占深 ' + alloc.lengthUsed + ' cm');
+  if (alloc.columns * alloc.horizontal * alloc.vertical > alloc.boxesPlaced) {
+    notes.push('最后一列未排满，实际 ' + alloc.boxesPlaced + ' 箱 (满格 ' + (alloc.columns * alloc.horizontal * alloc.vertical) + ') — 最靠柜底的一列请从一侧靠边排放 Last column partial');
+  }
+  if (sideGap > 1) notes.push('左右合计留隙 ' + sideGap + ' cm — 请靠中间排并用气袋/木条填缝，防止横向滑动 Fill side gaps');
+  if (topGap >= alloc.boxH * 0.5) {
+    notes.push('顶部留空 ' + topGap + ' cm — 此区块不堆满，外露的上方空间请勿再堆放其他货物，必要时加固定带 Headroom left');
+  }
+  if (prev && prev.vertical * prev.boxH > blockHeight + 1) {
+    notes.push('门侧相邻区块 (' + prev.name + ') 比本区块高 ' + round2(prev.vertical * prev.boxH - blockHeight) + ' cm — 本区块上方留有空隙，装柜时需先放稳本区块 Neighbour taller');
+  }
+  if (next && next.vertical * next.boxH > blockHeight + 1) {
+    notes.push('柜底侧相邻区块 (' + next.name + ') 比本区块高 ' + round2(next.vertical * next.boxH - blockHeight) + ' cm — 请确认高处货物后方有挡板/固定 Back neighbour taller');
+  }
+  if (idx === allocs.length - 1) {
+    const rest = round2(containerData.L - endLength);
+    if (rest > 1) notes.push('此区块之后至柜底尚余 ' + rest + ' cm 空间，请用填充物顶紧避免货物前后滑动 Remaining length at back');
+  }
+  if (idx === 0) notes.push('最靠柜门: 开门后最先看到本区块，卸货时最先取出 First out');
+
+  return {
+    section: idx + 1, name: alloc.name, color: alloc.color, pcsPerBox,
+    boxes: alloc.boxesPlaced, pcs: alloc.pcsPlaced,
+    horizontal: alloc.horizontal, vertical: alloc.vertical, columns: alloc.columns,
+    boxDims: alloc.boxL + '×' + alloc.boxW + '×' + alloc.boxH,
+    rotated: !!alloc.rotated, widthUnit, depthUnit: alloc.depthUnit,
+    startLength: alloc.startLength, endLength, lengthUsed: alloc.lengthUsed,
+    blockWidth: round2(blockWidth), blockHeight: round2(blockHeight),
+    weightKg: round2(weightKg), notes,
+  };
+}
+
+function setAllocFocus(group, focusIdx) {
+  const mats = group.userData.materialsByAlloc || {};
+  const sprites = group.userData.spritesByAlloc || {};
+  Object.keys(mats).forEach(k => {
+    const on = focusIdx === null || Number(k) === focusIdx;
+    mats[k].fill.transparent = !on;
+    mats[k].fill.opacity = on ? 1 : 0.08;
+    mats[k].edge.opacity = on ? 0.3 : 0.03;
+    (sprites[k] || []).forEach(sp => { sp.visible = on; });
+  });
+}
+
+function generateContainerViewPoints(containerData) {
+  if (typeof THREE === 'undefined') return [];
+  // 同一个货柜的结果只拍一次: 画面上的视角合集、打印、导出 PDF 共用 (以前每次都重拍 ~30 张)
+  if (containerData._viewPoints) return containerData._viewPoints;
+  ensureThreeSetup();
+  const prevRatio = threeRenderer.getPixelRatio();
+  threeRenderer.setPixelRatio(1); // 截图 840×600 打印在 A3 上约 168dpi 已足够, 不用 2 倍 (体积省 4 倍)
+
+  const offscreenId = 'viewPointSnapshotWrap';
+  let wrap = document.getElementById(offscreenId);
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = offscreenId;
+    wrap.style.cssText = 'position:fixed; left:-9999px; top:0; width:840px; height:600px;'; // 放大截图尺寸，A3 输出才清晰
+    document.body.appendChild(wrap);
+  }
+
+  render3DView(offscreenId, containerData);
+  const { L, W, H, allocations } = containerData;
+  const diag = Math.sqrt(L * L + W * W + H * H);
+  const cy = H / 2;
+  const shots = [];
+
+  function snap(label, pos, target, extra) {
+    threeCamera.position.set(pos[0], pos[1], pos[2]);
+    threeControls.target.set(target[0], target[1], target[2]);
+    threeControls.update();
+    threeRenderer.render(threeScene, threeCamera);
+    shots.push(Object.assign({ label, dataUrl: threeRenderer.domElement.toDataURL('image/jpeg', 0.82) }, extra || {}));
+  }
+
+  // 约定: 柜门在 -X 端，柜底在 +X 端 (与 startLength 从柜门起算、Front View 从柜门看一致)
+  const overview = [
+    { label: 'View Point-1 · 门侧左前等角 Door-Left', pos: [-diag * 0.5, diag * 0.42, diag * 0.68] },
+    { label: 'View Point-2 · 门侧右前等角 Door-Right', pos: [-diag * 0.5, diag * 0.42, -diag * 0.68] },
+    { label: 'View Point-3 · 顶视 Top-Down', pos: [0.01, diag * 0.98, 0.01] },
+    { label: 'View Point-4 · 柜门正视 Door-End', pos: [-diag * 0.95, diag * 0.22, 0.01] },
+    { label: 'View Point-5 · 柜底正视 Far-End', pos: [diag * 0.95, diag * 0.22, 0.01] },
+    { label: 'View Point-6 · 右侧视 Right Side', pos: [0.01, diag * 0.22, diag * 0.95] },
+  ];
+  overview.forEach(p => snap(p.label, p.pos, [0, cy, 0], { kind: 'overview' }));
+
+  // 多物品混装: 每个区块单独高亮，从三个角度拍特写，其余区块淡化
+  if (allocations.length > 1) {
+    allocations.forEach((alloc, idx) => {
+      const info = describeAllocation(alloc, containerData, idx);
+      const widthUnit = alloc.rotated ? alloc.boxL : alloc.boxW;
+      const blockW = alloc.horizontal * widthUnit;
+      const blockH = alloc.vertical * alloc.boxH;
+      const cx = -L / 2 + alloc.startLength + alloc.lengthUsed / 2;
+      const target = [cx, blockH / 2, 0];
+      const blockDiag = Math.sqrt(alloc.lengthUsed * alloc.lengthUsed + blockW * blockW + blockH * blockH);
+      const dist = Math.max(blockDiag * 1.35, 60);
+      const head = 'Section ' + (idx + 1) + ' · ' + alloc.name;
+      const extra = { kind: 'closeup', section: idx + 1, itemName: alloc.name, color: alloc.color, info };
+
+      setAllocFocus(threeGroup, idx);
+      snap(head + ' · 门侧斜视 Door-side', [cx - dist * 0.6, blockH / 2 + dist * 0.5, dist * 0.65], target, Object.assign({ angle: '门侧斜视 Door-side' }, extra));
+      snap(head + ' · 顶视 Top plan', [cx + 0.01, blockH / 2 + dist * 1.05, 0.01], target, Object.assign({ angle: '顶视 Top plan' }, extra));
+      snap(head + ' · 右侧剖视 Side', [cx, blockH / 2, dist * 1.05], target, Object.assign({ angle: '右侧视 Side' }, extra));
+    });
+    setAllocFocus(threeGroup, null); // 还原所有区块
+  }
+
+  threeRenderer.setPixelRatio(prevRatio);
+  // 不可枚举: 不会被 JSON.stringify 带进历史记录
+  Object.defineProperty(containerData, '_viewPoints', { value: shots, enumerable: false, configurable: true, writable: true });
+  return shots;
+}
+// ============================================================
+//  2D 正面 / 背面视图 Front / Back Flat Views (Canvas 2D)
+// ============================================================
+//  由于同一个货柜内，不同物品是依「深度」前后排列的 (每样物品各自
+//  占用一段连续的深度区间，但都占满整个柜宽)，因此从柜门看进去 (正面)
+//  或从柜内最深处往外看 (背面)，实际上会看到「最靠近该端的物品」；
+//  如果该物品没有堆到柜顶，上方空隙会透出「次靠近」的物品——
+//  buildStackedLayers 就是在做这个由近到远、由下往上堆叠的合成。
+// ============================================================
+function buildStackedLayers(containerData, fromFront) {
+  const order = fromFront ? containerData.allocations : [...containerData.allocations].reverse();
+  const layers = [];
+  let usedHeight = 0;
+
+  for (const alloc of order) {
+    if (usedHeight >= containerData.H - 0.01) break;
+    const remainingSpace = containerData.H - usedHeight;
+    const vCount = Math.min(alloc.vertical, Math.floor(remainingSpace / alloc.boxH));
+    if (vCount <= 0) continue;
+
+    layers.push({
+      name: alloc.name,
+      color: alloc.color,
+      horizontal: alloc.horizontal,
+      vertical: vCount,
+      boxH: alloc.boxH,
+      widthUnit: alloc.rotated ? alloc.boxL : alloc.boxW,
+      pcsPerBox: Math.round(alloc.pcsPlaced / alloc.boxesPlaced) || 0,
+      yOffset: usedHeight,
+    });
+    usedHeight += vCount * alloc.boxH;
+  }
+  return layers;
+}
+
+function drawFlatView(canvas, containerData, layers, forcedW, forcedH) {
+  if (!canvas) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const displayW = forcedW || canvas.clientWidth || 380;
+  const displayH = forcedH || canvas.clientHeight || 300;
+  canvas.width = displayW * dpr;
+  canvas.height = displayH * dpr;
+  canvas.style.height = displayH + 'px'; // 锁定显示高度：.flatcanvas 只用 CSS 控制宽度(100%)，
+                                          // 若不锁高度，高分屏下 buffer 变大会连带把显示高度撑高
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, displayW, displayH);
+
+  if (!layers || layers.length === 0) {
+    ctx.fillStyle = '#94A3B8';
+    ctx.font = '12px "IBM Plex Sans", sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('无数据 No data', displayW / 2, displayH / 2);
+    return;
+  }
+
+  const contW = containerData.W, contH = containerData.H;
+  const padTop = 22, padBottom = 16, padSide = 46;
+  const availW = displayW - padSide * 2;
+  const availH = displayH - padTop - padBottom;
+  const scale = Math.min(availW / contW, availH / contH);
+  const drawW = contW * scale, drawH = contH * scale;
+  const offsetX = (displayW - drawW) / 2;
+  const offsetY = padTop;
+
+  ctx.fillStyle = '#F5F7FA';
+  ctx.fillRect(offsetX, offsetY, drawW, drawH);
+
+  layers.forEach(layer => {
+    const gridW = layer.widthUnit * scale, gridH = layer.boxH * scale;
+    const blockWidth = layer.horizontal * layer.widthUnit * scale;
+    const blockHeight = layer.vertical * layer.boxH * scale;
+    const gridStartX = offsetX + (drawW - blockWidth) / 2;
+    const blockTopY = offsetY + drawH - (layer.yOffset * scale) - blockHeight;
+
+    // 画出该物品在此区块内的箱子网格线 (视觉上呈现箱数，而非逐一贴标)
+    for (let v = 0; v < layer.vertical; v++) {
+      for (let h = 0; h < layer.horizontal; h++) {
+        const x = gridStartX + h * gridW;
+        const y = blockTopY + (layer.vertical - 1 - v) * gridH;
+        ctx.fillStyle = layer.color;
+        ctx.globalAlpha = 0.88;
+        ctx.fillRect(x + 1, y + 1, Math.max(gridW - 2, 0), Math.max(gridH - 2, 0));
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = 'rgba(0,0,0,0.22)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(Math.round(x) + 0.5, Math.round(y) + 0.5, gridW, gridH);
+      }
+    }
+
+    // 区块外框 (整块物品的边界，加粗以利辨识不同物品的分界)
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(gridStartX, blockTopY, blockWidth, blockHeight);
+
+    // 名称 + 每箱 PCS 标签: 区块够大才直接标在区块中央 (仿照参考图 "MS-303H / 10 PCS" 的呈现方式)
+    const labelName = layer.name.length > 14 ? layer.name.slice(0, 13) + '…' : layer.name;
+    const canFitLabel = blockWidth >= 54 && blockHeight >= 34;
+    if (canFitLabel) {
+      const cx = gridStartX + blockWidth / 2;
+      const cy = blockTopY + blockHeight / 2;
+      const nameFont = Math.min(15, Math.max(9, Math.floor(blockHeight / 5)));
+      const pcsFont = Math.min(12, Math.max(8, Math.floor(blockHeight / 7)));
+
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      // 白底描边让文字在深色/浅色底上都清楚可读
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      ctx.font = `700 ${nameFont}px "IBM Plex Sans", sans-serif`;
+      ctx.strokeText(labelName, cx, cy - pcsFont * 0.7);
+      ctx.fillStyle = '#1B2A3A';
+      ctx.fillText(labelName, cx, cy - pcsFont * 0.7);
+
+      ctx.font = `600 ${pcsFont}px "IBM Plex Mono", monospace`;
+      ctx.strokeText(layer.pcsPerBox + ' PCS/箱', cx, cy + nameFont * 0.6);
+      ctx.fillText(layer.pcsPerBox + ' PCS/箱', cx, cy + nameFont * 0.6);
+    }
+  });
+
+  ctx.textBaseline = 'alphabetic';
+  ctx.strokeStyle = '#1B2A3A';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(offsetX, offsetY, drawW, drawH);
+
+  ctx.font = '500 10px "IBM Plex Mono", monospace';
+  ctx.fillStyle = '#64748B';
+  ctx.save();
+  ctx.translate(offsetX - 10, offsetY + drawH / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.fillText(contH + ' cm', 0, 0);
+  ctx.restore();
+  ctx.textAlign = 'center';
+  ctx.fillText(contW + ' cm', displayW / 2, offsetY - 8);
+
+  // 图例: 小区块画不下标签时，用底部图例补齐「颜色 = 产品名 + 每箱PCS」
+  const tinyLayers = layers.filter(l => (l.horizontal * l.widthUnit * scale) < 54 || (l.vertical * l.boxH * scale) < 34);
+  if (tinyLayers.length > 0) {
+    let lx = 4, ly = displayH - 6;
+    ctx.font = '500 10px "IBM Plex Sans", sans-serif';
+    ctx.textAlign = 'left';
+    tinyLayers.slice(0, 4).forEach(l => {
+      const label = `${l.name.length > 12 ? l.name.slice(0, 11) + '…' : l.name} (${l.pcsPerBox}pcs/箱)`;
+      ctx.fillStyle = l.color;
+      ctx.fillRect(lx, ly - 8, 8, 8);
+      ctx.fillStyle = '#64748B';
+      ctx.fillText(label, lx + 11, ly);
+      lx += ctx.measureText(label).width + 25;
+    });
+  }
+}
+</script>

@@ -1,0 +1,31 @@
+name: container_calc
+description: "A new Flutter project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.1
+
+dependencies:
+  archive: ^4.6.0
+  flutter:
+    sdk: flutter
+  pdf: ^3.13.1
+  supabase_flutter: ^2.18.3
+  vector_math: ^2.4.4
+  web: ^1.1.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  fonts:
+    # Noto Sans SC 子集 (SIL OFL): 界面与 PDF 共用, 不依赖外部字体 CDN
+    - family: NotoSansSC
+      fonts:
+        - asset: assets/fonts/NotoSansSC-subset.ttf
+  assets:
+    - assets/fonts/NotoSansSC-subset.ttf

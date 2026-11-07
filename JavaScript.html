@@ -1,0 +1,667 @@
+<script>
+/* ============================================================
+   集装箱装载计算器 - 核心逻辑 Core Application Logic
+   ============================================================
+   内容: 全局状态 / 装箱算法 (已用 Node.js 验证) / 物品与柜型管理
+         / Google Sheet 读写串接 / 结果渲染入口
+   ============================================================ */
+
+// ---------- 全局状态 State ----------
+const AppState = {
+  items: [],              // [{id, name, totalPcs, pcsPerBox, boxL, boxW, boxH, boxWeight, color}]
+  containerPresets: [],    // 全部预设 (含未启用) all presets incl. inactive
+  activeContainerIds: new Set(), // 本次计算允许使用的柜型 _row id
+  result: null,            // 最近一次计算结果
+  selectedContainerIndex: 0,
+  itemMaster: [],
+  detailRenderToken: 0,    // 竞态保护用：每次 renderContainerDetail 递增，非同步回呼比对用
+  currentUser: null,       // 登入中的使用者资料 (定义于 Auth.html)
+  authToken: null,         // 目前登入的 session token
+  adminUsers: [],          // 管理后台载入的全部帐号资料 (仅 admin 会用到)
+  accessories: [],         // 货运信息里的配件清单 [{id, name, qty}]
+};
+
+const COLOR_PALETTE = [
+  '#e74c3c', '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#1abc9c',
+  '#e67e22', '#34495e', '#f1c40f', '#e84393', '#00b894', '#0984e3',
+];
+let colorCursor = 0;
+function nextColor() {
+  const c = COLOR_PALETTE[colorCursor % COLOR_PALETTE.length];
+  colorCursor++;
+  return c;
+}
+
+let itemIdCounter = 1;
+
+// ============================================================
+//  装箱算法 Packing Algorithm
+//  (与 Node.js 独立测试版本一致，已验证：单柜混装 / 多柜分配 /
+//   超尺寸侦测 / 重量限制均正确)
+// ============================================================
+function calcBoxesNeeded(item) {
+  return Math.ceil(item.totalPcs / item.pcsPerBox);
+}
+
+// 决定物品在柜内的最佳排列方向 (只允许水平面 90° 旋转，高度方向固定不翻转)
+//  needed (选填): 还需要放的箱数。两种方向都装得下时, 选「占用柜长较短」的那个 (把长度留给后面的物品);
+//  装不下时才选「可放箱数较多」的。不传 needed 则维持原本的「容量最大」判断。
+function bestFitGrid(boxL, boxW, boxH, availL, contW, contH, needed) {
+  const optA = {
+    horizontal: Math.floor(contW / boxW),
+    vertical: Math.floor(contH / boxH),
+    depthUnit: boxL,
+    rotated: false,
+  };
+  const optB = {
+    horizontal: Math.floor(contW / boxL),
+    vertical: Math.floor(contH / boxH),
+    depthUnit: boxW,
+    rotated: true,
+  };
+  const perA = optA.horizontal * optA.vertical, perB = optB.horizontal * optB.vertical;
+  const totalA = perA * Math.floor(availL / Math.max(optA.depthUnit, 0.0001));
+  const totalB = perB * Math.floor(availL / Math.max(optB.depthUnit, 0.0001));
+  if (needed > 0 && totalA >= needed && totalB >= needed && perA > 0 && perB > 0) {
+    const lenA = Math.ceil(needed / perA) * optA.depthUnit, lenB = Math.ceil(needed / perB) * optB.depthUnit;
+    if (lenA !== lenB) return lenB < lenA ? optB : optA;
+    return perB > perA ? optB : optA;
+  }
+  return totalB > totalA ? optB : optA;
+}
+
+function simulateFillContainer(items, cont) {
+  let remainingLength = cont.L;
+  let totalVolumeUsed = 0;
+  let totalWeightUsed = 0;
+  const allocations = [];
+
+  for (const item of items) {
+    if (item.boxesRemaining <= 0) continue;
+    if (remainingLength <= 0) break;
+
+    const grid = bestFitGrid(item.boxL, item.boxW, item.boxH, remainingLength, cont.W, cont.H, item.boxesRemaining);
+    const perColumn = grid.horizontal * grid.vertical;
+    if (perColumn === 0) continue; // 尺寸超过柜内空间，此柜型无法容纳该物品
+
+    const maxColumnsAvailable = Math.floor(remainingLength / grid.depthUnit);
+    if (maxColumnsAvailable <= 0) continue;
+
+    const columnsNeeded = Math.ceil(item.boxesRemaining / perColumn);
+    const columnsToUse = Math.min(maxColumnsAvailable, columnsNeeded);
+    let boxesPlaced = Math.min(item.boxesRemaining, columnsToUse * perColumn);
+
+    if (item.boxWeight > 0) {
+      const weightLeft = cont.maxPayload - totalWeightUsed;
+      const maxByWeight = Math.floor(weightLeft / item.boxWeight);
+      boxesPlaced = Math.min(boxesPlaced, Math.max(0, maxByWeight));
+    }
+    if (boxesPlaced <= 0) continue;
+
+    const actualColumns = Math.ceil(boxesPlaced / perColumn);
+    const lengthUsed = actualColumns * grid.depthUnit;
+
+    allocations.push({
+      itemId: item.id, name: item.name, color: item.color, boxesPlaced,
+      pcsPlaced: boxesPlaced * item.pcsPerBox,
+      boxL: item.boxL, boxW: item.boxW, boxH: item.boxH,
+      horizontal: grid.horizontal, vertical: grid.vertical, columns: actualColumns,
+      rotated: grid.rotated, depthUnit: grid.depthUnit,
+      boxWeight: item.boxWeight || 0, pcsPerBox: item.pcsPerBox,
+      lengthUsed: round2(lengthUsed),
+      startLength: round2(cont.L - remainingLength),
+    });
+
+    remainingLength -= lengthUsed;
+    totalVolumeUsed += boxesPlaced * item.boxL * item.boxW * item.boxH;
+    totalWeightUsed += boxesPlaced * (item.boxWeight || 0);
+    item.boxesRemaining -= boxesPlaced;
+  }
+
+  const containerVolume = cont.L * cont.W * cont.H;
+  return {
+    utilization: containerVolume > 0 ? totalVolumeUsed / containerVolume : 0,
+    allocations, totalWeightUsed, totalVolumeUsed, remainingLength
+  };
+}
+
+function round2(n) { return Math.round(n * 100) / 100; }
+
+// ============================================================
+//  载入资料的清洗 Sanitizing loaded data
+// ============================================================
+//  历史记录是存在服务器上的任意 JSON (别的使用者也能写入, admin 载入时会读到)。
+//  载入时一律重建成「只含预期型别」的物件: 数字用 Number()、颜色只接受 #rrggbb、
+//  文字限长, 这样即使记录被恶意构造, 也不可能在页面里注入脚本或样式。
+// ============================================================
+function numOr(v, d) { const n = Number(v); return isFinite(n) ? n : (d || 0); }
+function safeColor(c) { return /^#[0-9a-fA-F]{6}$/.test(String(c)) ? String(c) : '#888888'; }
+function safeStr(s, max) { return String(s == null ? '' : s).slice(0, max || 200); }
+
+function sanitizeItems(list) {
+  return (Array.isArray(list) ? list : []).slice(0, 500).map(function (it, i) {
+    it = it || {};
+    const n = function (v) { return (v === '' || v == null) ? '' : numOr(v); };
+    return {
+      id: Math.floor(numOr(it.id, i + 1)), name: safeStr(it.name), color: safeColor(it.color),
+      totalPcs: n(it.totalPcs), pcsPerBox: n(it.pcsPerBox), boxL: n(it.boxL), boxW: n(it.boxW), boxH: n(it.boxH), boxWeight: n(it.boxWeight),
+    };
+  });
+}
+
+// 回传 null 表示记录不可信/不完整, 调用方应改为用物品清单重新计算
+function sanitizeResult(r) {
+  if (!r || !Array.isArray(r.containers) || r.containers.length === 0) return null;
+  let ok = true;
+  const containers = r.containers.slice(0, 800).map(function (c) {
+    c = c || {};
+    const cont = {
+      containerType: safeStr(c.containerType), L: numOr(c.L), W: numOr(c.W), H: numOr(c.H),
+      utilization: numOr(c.utilization), totalWeightUsed: numOr(c.totalWeightUsed), maxPayload: numOr(c.maxPayload),
+      allocations: (Array.isArray(c.allocations) ? c.allocations : []).slice(0, 200).map(function (a) {
+        a = a || {};
+        const al = {
+          itemId: numOr(a.itemId), name: safeStr(a.name), color: safeColor(a.color),
+          boxesPlaced: numOr(a.boxesPlaced), pcsPlaced: numOr(a.pcsPlaced),
+          boxL: numOr(a.boxL), boxW: numOr(a.boxW), boxH: numOr(a.boxH),
+          horizontal: numOr(a.horizontal), vertical: numOr(a.vertical), columns: numOr(a.columns),
+          rotated: !!a.rotated, depthUnit: numOr(a.depthUnit), boxWeight: numOr(a.boxWeight), pcsPerBox: numOr(a.pcsPerBox),
+          lengthUsed: numOr(a.lengthUsed), startLength: numOr(a.startLength),
+        };
+        if (!(al.horizontal > 0 && al.vertical > 0 && al.columns > 0 && al.boxL > 0 && al.boxW > 0 && al.boxH > 0 && al.depthUnit > 0 && al.boxesPlaced > 0)) ok = false;
+        return al;
+      }),
+    };
+    if (!(cont.L > 0 && cont.W > 0 && cont.H > 0)) ok = false;
+    return cont;
+  });
+  if (!ok) return null;
+  const unfulfilled = (Array.isArray(r.unfulfilled) ? r.unfulfilled : []).slice(0, 500).map(function (u) {
+    u = u || {};
+    return { name: safeStr(u.name), boxesRemaining: numOr(u.boxesRemaining) };
+  });
+  return { containers: containers, unfulfilled: unfulfilled };
+}
+
+// ---------- 多策略装柜 ----------
+//  纯贪婪法每一轮只挑「当轮利用率最高」的柜型, 看不到整体: 例如 1000 箱刚好一个 45HC 装得下,
+//  却会先选 40HC (利用率较高) 再补一个 20GP。所以改成: 用「物品排序 × 选柜策略」多种组合
+//  各完整算一遍, 再依 (未装箱数 ↓, 柜数 ↓, 总柜容积 ↓, 平均利用率 ↑) 挑最好的一套。
+//  第一个组合 (体积排序 + 利用率优先) 就是原本的算法, 所以结果不会比以前差。
+const PACK_ORDERINGS = {
+  volume: (a, b) => (b.boxL * b.boxW * b.boxH * b.boxesRemaining) - (a.boxL * a.boxW * a.boxH * a.boxesRemaining),
+  height: (a, b) => (b.boxH - a.boxH) || (b.boxL * b.boxW * b.boxH * b.boxesRemaining) - (a.boxL * a.boxW * a.boxH * a.boxesRemaining),
+  footprint: (a, b) => (b.boxL * b.boxW - a.boxL * a.boxW) || (b.boxL * b.boxW * b.boxH * b.boxesRemaining) - (a.boxL * a.boxW * a.boxH * a.boxesRemaining),
+};
+
+// 选柜策略: 从候选 (柜型 + 模拟结果) 里挑本轮要用的
+const PACK_POLICIES = {
+  util: cands => cands.reduce((b, c) => (!b || c.result.utilization > b.result.utilization) ? c : b, null),
+  fit: cands => {
+    const done = cands.filter(c => c.leftover === 0); // 剩余物品全部放得下的柜型里, 挑最小的
+    if (done.length) return done.reduce((b, c) => (c.vol < b.vol || (c.vol === b.vol && c.result.utilization > b.result.utilization)) ? c : b);
+    return cands.reduce((b, c) => (!b || c.result.totalVolumeUsed > b.result.totalVolumeUsed) ? c : b, null);
+  },
+  max: cands => cands.reduce((b, c) => (!b || c.result.totalVolumeUsed > b.result.totalVolumeUsed ||
+    (c.result.totalVolumeUsed === b.result.totalVolumeUsed && c.vol < b.vol)) ? c : b, null),
+};
+
+function packWithStrategy(itemsInput, containerPresets, orderFn, policyFn) {
+  const items = itemsInput.map(it => ({ ...it, boxesRemaining: calcBoxesNeeded(it) }));
+  const usedContainers = [];
+  let safety = 0;
+
+  while (items.some(it => it.boxesRemaining > 0) && safety < 800) {
+    safety++;
+    const sortedItems = [...items].sort(orderFn);
+
+    const cands = [];
+    for (const cont of containerPresets) {
+      const itemsCopy = sortedItems.map(i => ({ ...i }));
+      const result = simulateFillContainer(itemsCopy, cont);
+      if (result.allocations.length === 0) continue;
+      cands.push({ cont, result, vol: cont.L * cont.W * cont.H, leftover: itemsCopy.reduce((s, i) => s + i.boxesRemaining, 0) });
+    }
+    const best = policyFn(cands);
+    if (!best) break; // 剩余物品无法装入任何可用柜型
+
+    for (const alloc of best.result.allocations) {
+      const realItem = items.find(i => i.id === alloc.itemId);
+      realItem.boxesRemaining -= alloc.boxesPlaced;
+    }
+
+    usedContainers.push({
+      containerType: best.cont.name, L: best.cont.L, W: best.cont.W, H: best.cont.H,
+      allocations: best.result.allocations, utilization: best.result.utilization,
+      totalWeightUsed: round2(best.result.totalWeightUsed), maxPayload: best.cont.maxPayload,
+    });
+  }
+  return { containers: usedContainers, unfulfilled: items.filter(i => i.boxesRemaining > 0) };
+}
+
+// 数值越小越好: [未装箱数, 柜数, 总柜容积, -平均利用率]
+function packScore(r) {
+  const left = r.unfulfilled.reduce((s, i) => s + i.boxesRemaining, 0);
+  const vol = r.containers.reduce((s, c) => s + c.L * c.W * c.H, 0);
+  const util = r.containers.length ? r.containers.reduce((s, c) => s + c.utilization, 0) / r.containers.length : 0;
+  return [left, r.containers.length, vol, -util];
+}
+function packScoreLess(a, b) {
+  for (let i = 0; i < a.length; i++) {
+    if (Math.abs(a[i] - b[i]) > 1e-9) return a[i] < b[i];
+  }
+  return false; // 完全相同: 保留先算出的 (原本算法) 结果
+}
+
+function packContainers(itemsInput, containerPresets) {
+  let best = null, bestScore = null;
+  for (const oName of Object.keys(PACK_ORDERINGS)) {
+    for (const pName of Object.keys(PACK_POLICIES)) {
+      const r = packWithStrategy(itemsInput, containerPresets, PACK_ORDERINGS[oName], PACK_POLICIES[pName]);
+      const s = packScore(r);
+      if (!best || packScoreLess(s, bestScore)) { best = r; bestScore = s; }
+    }
+  }
+  return best;
+}
+
+// ============================================================
+//  物品清单管理 Item List Management
+// ============================================================
+function addItemRow(prefill) {
+  const item = Object.assign({
+    id: itemIdCounter++,
+    name: '', totalPcs: '', pcsPerBox: '', boxL: '', boxW: '', boxH: '', boxWeight: '',
+    color: nextColor(),
+  }, prefill || {});
+  AppState.items.push(item);
+  renderItemsTable();
+}
+
+function removeItemRow(id) {
+  AppState.items = AppState.items.filter(i => i.id !== id);
+  renderItemsTable();
+}
+
+function updateItemField(id, field, value) {
+  const item = AppState.items.find(i => i.id === id);
+  if (!item) return;
+  if (['totalPcs', 'pcsPerBox', 'boxL', 'boxW', 'boxH', 'boxWeight'].includes(field)) {
+    item[field] = value === '' ? '' : Number(value);
+  } else {
+    item[field] = value;
+  }
+}
+
+function validateItems() {
+  const errors = [];
+  if (AppState.items.length === 0) errors.push('请至少添加一样物品 Please add at least one item');
+  AppState.items.forEach((it, idx) => {
+    const label = it.name || `第 ${idx + 1} 行 Row ${idx + 1}`;
+    if (!it.name) errors.push(`${label}: 缺少物品名称 missing item name`);
+    if (!(it.totalPcs > 0)) errors.push(`${label}: 总数量 PCS 需大于 0 PCS must be > 0`);
+    if (!(it.pcsPerBox > 0)) errors.push(`${label}: 每箱 PCS 需大于 0 PCS/box must be > 0`);
+    if (!(it.boxL > 0) || !(it.boxW > 0) || !(it.boxH > 0)) errors.push(`${label}: 箱子尺寸需为大于 0 的数字 box dimensions must be > 0`);
+    if (it.boxWeight !== '' && it.boxWeight != null && !(it.boxWeight >= 0)) errors.push(`${label}: 重量不能为负 weight cannot be negative`);
+  });
+  return errors;
+}
+
+// ============================================================
+//  货运信息 / 配件清单 Shipment Info & Accessories
+// ============================================================
+let accessoryIdCounter = 1;
+const DEFAULT_ACCESSORIES = ['Cable Clip', 'Screw', 'Sticker', 'Manual Book', 'Instruction Sheet', 'Warning Label'];
+
+function addAccessoryRow(prefill) {
+  const acc = Object.assign({ id: accessoryIdCounter++, name: '', qty: '' }, prefill || {});
+  AppState.accessories.push(acc);
+  renderAccessoryTable();
+}
+
+function removeAccessoryRow(id) {
+  AppState.accessories = AppState.accessories.filter(a => a.id !== id);
+  renderAccessoryTable();
+}
+
+function updateAccessoryField(id, field, value) {
+  const acc = AppState.accessories.find(a => a.id === id);
+  if (!acc) return;
+  acc[field] = field === 'qty' ? value : value;
+}
+
+function renderAccessoryTable() {
+  const tbody = document.getElementById('accessoryTableBody');
+  if (!tbody) return;
+  tbody.innerHTML = AppState.accessories.map(a => `
+    <tr>
+      <td><input type="text" value="${escapeAttr(a.name)}" data-acc-id="${a.id}" data-acc-field="name" placeholder="例如: Cable Clip"></td>
+      <td class="col-narrow"><input type="text" value="${escapeAttr(a.qty)}" data-acc-id="${a.id}" data-acc-field="qty" placeholder="数量/qty"></td>
+      <td class="col-del"><button class="icon-btn" data-acc-remove="${a.id}" title="删除 Remove">✕</button></td>
+    </tr>
+  `).join('');
+  tbody.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('input', function () { updateAccessoryField(Number(this.dataset.accId), this.dataset.accField, this.value); });
+  });
+  tbody.querySelectorAll('[data-acc-remove]').forEach(btn => {
+    btn.addEventListener('click', function () { removeAccessoryRow(Number(this.dataset.accRemove)); });
+  });
+}
+
+// 汇总货运信息表单目前的内容 (给 PDF 生成时使用)
+function getShipmentInfo() {
+  return {
+    customer: document.getElementById('shipCustomer').value.trim(),
+    etd: document.getElementById('shipETD').value,
+    eta: document.getElementById('shipETA').value,
+    shippingLine: document.getElementById('shipLine').value.trim(),
+    remark: document.getElementById('shipRemark').value.trim(),
+    drawn: document.getElementById('shipDrawn').value.trim(),
+    checked: document.getElementById('shipChecked').value.trim(),
+    confirmed: document.getElementById('shipConfirmed').value.trim(),
+    accessories: AppState.accessories.filter(a => a.name).map(a => ({ name: a.name, qty: a.qty })),
+  };
+}
+
+// 把历史记录里的货运信息填回表单 (内容已清洗: 只收字串/日期格式)
+function applyShipmentInfo(info) {
+  if (!info || typeof info !== 'object') return;
+  const setText = function (id, v) { const el = document.getElementById(id); if (el) el.value = safeStr(v, 300); };
+  const setDate = function (id, v) { const el = document.getElementById(id); if (el) el.value = /^\d{4}-\d{2}-\d{2}$/.test(String(v)) ? v : ''; };
+  setText('shipCustomer', info.customer); setDate('shipETD', info.etd); setDate('shipETA', info.eta);
+  setText('shipLine', info.shippingLine); setText('shipRemark', info.remark);
+  setText('shipDrawn', info.drawn); setText('shipChecked', info.checked); setText('shipConfirmed', info.confirmed);
+  if (Array.isArray(info.accessories)) {
+    AppState.accessories = info.accessories.slice(0, 100).map(function (a) {
+      return { id: accessoryIdCounter++, name: safeStr(a && a.name, 100), qty: safeStr(a && a.qty, 30) };
+    });
+    renderAccessoryTable();
+  }
+}
+
+// ============================================================
+//  柜型预设管理 Container Preset Management
+// ============================================================
+function loadContainerPresets() {
+  google.script.run
+    .withSuccessHandler(function (presets) {
+      AppState.containerPresets = presets;
+      AppState.activeContainerIds = new Set(
+        presets.filter(p => p['Active'] !== false && p['Active'] !== 'FALSE').map(p => p._row)
+      );
+      renderContainerPresets();
+    })
+    .withFailureHandler(handleServerError)
+    .getAllContainerPresets(AppState.authToken);
+}
+
+function getSelectedContainerPresets() {
+  return AppState.containerPresets
+    .filter(p => AppState.activeContainerIds.has(p._row))
+    .map(p => ({
+      name: p['Container Name'], L: Number(p['Length (cm)']), W: Number(p['Width (cm)']),
+      H: Number(p['Height (cm)']), maxPayload: Number(p['Max Payload (kg)']) || 999999999,
+    }));
+}
+
+function toggleContainerPreset(row, checked) {
+  if (checked) AppState.activeContainerIds.add(row);
+  else AppState.activeContainerIds.delete(row);
+}
+
+// ============================================================
+//  执行计算 Run Calculation
+// ============================================================
+function runCalculation() {
+  const errors = validateItems();
+  const selectedContainers = getSelectedContainerPresets();
+  if (selectedContainers.length === 0) errors.push('请至少启用一种集装箱尺寸 Please enable at least one container size');
+
+  if (errors.length > 0) {
+    showToast(errors[0], true);
+    return;
+  }
+
+  setCalcButtonLoading(true);
+
+  // 用 setTimeout 释放一帧，让 loading 状态先渲染出来 (物品多时演算需要一点时间)
+  setTimeout(function () {
+    try {
+      const itemsForCalc = AppState.items.map(it => ({
+        id: it.id, name: it.name, totalPcs: it.totalPcs, pcsPerBox: it.pcsPerBox,
+        boxL: it.boxL, boxW: it.boxW, boxH: it.boxH, boxWeight: it.boxWeight || 0, color: it.color,
+      }));
+      const result = packContainers(itemsForCalc, selectedContainers);
+      // 记下计算当时的物品清单 (不可枚举, 不会存进历史): PDF 总览用它, 计算后再改表格也不会和货柜内容对不上
+      Object.defineProperty(result, '_items', { value: itemsForCalc, enumerable: false });
+      AppState.result = result;
+      AppState.selectedContainerIndex = 0;
+      setCalcButtonLoading(false);
+
+      playPackingAnimation(result, function () {
+        renderResults();
+        if (result.unfulfilled.length > 0) {
+          showToast('部分物品尺寸超过所有已选柜型内部空间，请查看结果页警示 Some items exceed all selected container sizes', true);
+        } else {
+          showToast('计算完成 Calculation complete ✓');
+        }
+        document.getElementById('resultsSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    } catch (err) {
+      console.error(err);
+      showToast('计算时发生错误 Calculation error: ' + err.message, true);
+      setCalcButtonLoading(false);
+    }
+  }, 30);
+}
+
+function setCalcButtonLoading(loading) {
+  const btn = document.getElementById('calcBtn');
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.innerHTML = loading
+    ? '<span class="spinner"></span> 计算中 Calculating...'
+    : '⚙ 计算装载方案 Calculate Loading Plan';
+}
+
+// ============================================================
+//  装箱动画 Packing Animation
+// ============================================================
+//  纯视觉效果，不代表精确数量：从计算结果里取前几个货柜，依序播放
+//  小方块 (颜色对应物品) 飞入货柜轮廓的动画，营造「一个个装箱」的
+//  实感，动画结束(或使用者按跳过)后才真正显示结果画面。
+// ============================================================
+let packAnimFrame = null;
+let packAnimOnDone = null;
+
+function playPackingAnimation(result, onComplete) {
+  const overlay = document.getElementById('packAnimOverlay');
+  const canvas = document.getElementById('packAnimCanvas');
+  if (!overlay || !canvas || !result.containers.length) { onComplete(); return; }
+
+  packAnimOnDone = onComplete;
+  overlay.classList.add('show');
+
+  const ctx = canvas.getContext('2d');
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const W = canvas.clientWidth || 680, H = canvas.clientHeight || 280;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  const shown = result.containers.slice(0, 6);
+  const extraCount = result.containers.length - shown.length;
+  const cols = shown.length;
+  const gap = 16, padSide = 20, padTop = 28, padBottom = 34;
+  const slotW = (W - padSide * 2 - gap * (cols - 1)) / cols;
+  const slotH = H - padTop - padBottom;
+
+  const gridCols = 7, gridRows = 2; // 每个货柜固定画 14 个方块位置 (纯示意，非实际数量)
+  const boxGap = 3;
+  const boxW = (slotW - 10 - boxGap * (gridCols - 1)) / gridCols;
+  const boxH = (slotH - 10 - boxGap * (gridRows - 1)) / gridRows;
+
+  const particles = [];
+  shown.forEach((c, ci) => {
+    const outlineX = padSide + ci * (slotW + gap);
+    const outlineY = padTop;
+    // 依该货柜实际物品占比，产生一份 14 格的颜色马赛克 (让动画色彩跟真实结果对应)
+    const totalPlaced = c.allocations.reduce((s, a) => s + a.boxesPlaced, 0) || 1;
+    let cum = 0;
+    const totalSlots = gridCols * gridRows;
+    for (let i = 0; i < totalSlots; i++) {
+      const frac = (i + 0.5) / totalSlots;
+      let acc = 0, color = c.allocations[0] ? c.allocations[0].color : '#94A3B8';
+      for (const a of c.allocations) {
+        acc += a.boxesPlaced / totalPlaced;
+        if (frac <= acc) { color = a.color; break; }
+      }
+      const col = i % gridCols, row = Math.floor(i / gridCols);
+      const targetX = outlineX + 5 + col * (boxW + boxGap);
+      const targetY = outlineY + slotH - 5 - (row + 1) * boxH - row * boxGap;
+      particles.push({
+        color,
+        x: outlineX + slotW / 2 + (Math.random() - 0.5) * 40,
+        y: H + 30 + Math.random() * 60,
+        targetX, targetY,
+        delay: ci * 260 + i * 16,
+        dur: 420,
+        w: boxW, h: boxH,
+      });
+    }
+  });
+
+  const startTime = performance.now();
+  const totalDuration = shown.length > 0 ? (shown.length - 1) * 260 + gridCols * gridRows * 16 + 420 + 260 : 0;
+
+  function easeOutBack(t) {
+    const c1 = 1.4, c3 = c1 + 1;
+    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+  }
+
+  function draw(now) {
+    const elapsed = now - startTime;
+    ctx.clearRect(0, 0, W, H);
+
+    shown.forEach((c, ci) => {
+      const outlineX = padSide + ci * (slotW + gap);
+      ctx.strokeStyle = '#1B2A3A';
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(outlineX, padTop, slotW, slotH);
+      ctx.fillStyle = '#64748B';
+      ctx.font = '600 10px "IBM Plex Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('UNIT ' + (ci + 1), outlineX + slotW / 2, padTop - 8);
+      ctx.fillStyle = '#94A3B8';
+      ctx.font = '500 9px "IBM Plex Mono", monospace';
+      ctx.fillText(c.containerType.split(' ')[0], outlineX + slotW / 2, padTop + slotH + 16);
+    });
+
+    let allLanded = true;
+    particles.forEach(p => {
+      const t = (elapsed - p.delay) / p.dur;
+      if (t < 0) { allLanded = false; return; }
+      const clamped = Math.min(1, t);
+      if (clamped < 1) allLanded = false;
+      const eased = easeOutBack(clamped);
+      const x = p.x + (p.targetX - p.x) * eased;
+      const y = p.y + (p.targetY - p.y) * eased;
+      ctx.fillStyle = p.color;
+      ctx.globalAlpha = 0.92;
+      ctx.fillRect(x, y, p.w, p.h);
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, y + 0.5, p.w, p.h);
+    });
+
+    if (extraCount > 0) {
+      ctx.fillStyle = '#94A3B8';
+      ctx.font = '500 11px "IBM Plex Sans", sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText('+ 还有 ' + extraCount + ' 个货柜 more containers…', padSide, H - 10);
+    }
+
+    if (elapsed < totalDuration + 200 && overlay.classList.contains('show')) {
+      packAnimFrame = requestAnimationFrame(draw);
+    } else {
+      finishPackingAnimation();
+    }
+  }
+
+  packAnimFrame = requestAnimationFrame(draw);
+}
+
+function finishPackingAnimation() {
+  if (packAnimFrame) cancelAnimationFrame(packAnimFrame);
+  packAnimFrame = null;
+  const overlay = document.getElementById('packAnimOverlay');
+  if (overlay) overlay.classList.remove('show');
+  const cb = packAnimOnDone;
+  packAnimOnDone = null;
+  if (cb) cb();
+}
+
+// ============================================================
+//  Toast / 错误处理
+// ============================================================
+function showToast(msg, isError) {
+  let toast = document.getElementById('appToast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'appToast';
+    toast.className = 'toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.className = 'toast show' + (isError ? ' error' : '');
+  clearTimeout(toast._timer);
+  toast._timer = setTimeout(() => { toast.className = 'toast'; }, 3600);
+}
+
+function handleServerError(err) {
+  console.error(err);
+  const msg = String((err && err.message) || err);
+  // 登入过期 / 被撤销 / 帐号停用：直接回到登入画面，而不是只弹错误
+  if (/过期|已失效|已被停用|expired|revoked|inactive|请重新登入|log in again/i.test(msg) && typeof resetAndReload === 'function') {
+    resetAndReload(msg.replace(/^Error:\s*/, ''));
+    return;
+  }
+  showToast('服务器错误 Server error: ' + msg, true);
+}
+
+// ============================================================
+//  初始化 Init
+// ============================================================
+let mainAppInitialized = false;
+
+// 登入成功后才呼叫 (见 Auth.html 的 showMainApp)，避免未登入就打 Sheet API 或产生资料
+function initMainApp() {
+  if (mainAppInitialized) return; // 防止同一页面重复登入/登出时重复初始化，累加出多余的物品列
+  mainAppInitialized = true;
+  loadContainerPresets();
+  addItemRow();
+  addItemRow();
+  DEFAULT_ACCESSORIES.forEach(name => addAccessoryRow({ name, qty: '' }));
+}
+
+window.addEventListener('DOMContentLoaded', function () {
+  document.getElementById('calcBtn').addEventListener('click', runCalculation);
+  document.getElementById('addItemBtn').addEventListener('click', () => addItemRow());
+  document.getElementById('addAccessoryBtn').addEventListener('click', () => addAccessoryRow());
+  document.getElementById('cModalCancel').addEventListener('click', closeContainerModal);
+  document.getElementById('cModalSave').addEventListener('click', saveContainerModal);
+  document.getElementById('containerModal').addEventListener('click', function (e) {
+    if (e.target === this) closeContainerModal(); // 点击遮罩层关闭 click outside to close
+  });
+  document.getElementById('historyBtn').addEventListener('click', openHistoryModal);
+  document.getElementById('historyClose').addEventListener('click', closeHistoryModal);
+  document.getElementById('historyModal').addEventListener('click', function (e) {
+    if (e.target === this) { closeHistoryModal(); return; }
+    const b = e.target.closest('button[data-act]');
+    if (!b) return;
+    const id = b.dataset.id;
+    if (b.dataset.act === 'load') loadHistoryEntry(id); else deleteHistoryEntry(id);
+  });
+  document.getElementById('packAnimSkip').addEventListener('click', finishPackingAnimation);
+});
+</script>

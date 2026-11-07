@@ -1,0 +1,536 @@
+<script>
+/* ============================================================
+   渲染逻辑 DOM Rendering
+   ============================================================ */
+
+// ---------- 物品清单表格 Item Table ----------
+function renderItemsTable() {
+  const tbody = document.getElementById('itemsTableBody');
+  tbody.innerHTML = '';
+
+  AppState.items.forEach(item => {
+    const boxesNeeded = (item.totalPcs && item.pcsPerBox) ? Math.ceil(item.totalPcs / item.pcsPerBox) : 0;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td class="col-color">
+        <input type="color" class="color-swatch-input" value="${safeColor(item.color)}" data-id="${Number(item.id)}" data-field="color">
+      </td>
+      <td><input type="text" placeholder="例如: 钢管 Steel Pipe" value="${escapeAttr(item.name)}" data-id="${Number(item.id)}" data-field="name"></td>
+      <td class="col-narrow"><input type="number" min="0" placeholder="0" value="${escapeAttr(item.totalPcs)}" data-id="${Number(item.id)}" data-field="totalPcs"></td>
+      <td class="col-narrow"><input type="number" min="1" placeholder="0" value="${escapeAttr(item.pcsPerBox)}" data-id="${Number(item.id)}" data-field="pcsPerBox"></td>
+      <td class="col-narrow"><input type="number" min="0" placeholder="L" value="${escapeAttr(item.boxL)}" data-id="${Number(item.id)}" data-field="boxL"></td>
+      <td class="col-narrow"><input type="number" min="0" placeholder="W" value="${escapeAttr(item.boxW)}" data-id="${Number(item.id)}" data-field="boxW"></td>
+      <td class="col-narrow"><input type="number" min="0" placeholder="H" value="${escapeAttr(item.boxH)}" data-id="${Number(item.id)}" data-field="boxH"></td>
+      <td class="col-narrow"><input type="number" min="0" placeholder="选填(每箱 per box)" value="${escapeAttr(item.boxWeight)}" data-id="${Number(item.id)}" data-field="boxWeight"></td>
+      <td class="col-narrow mono" style="text-align:right; color:var(--text-secondary); font-size:12.5px;">${boxesNeeded || '—'} 箱</td>
+      <td class="col-del"><button class="icon-btn" data-remove="${item.id}" title="删除 Remove">✕</button></td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  tbody.querySelectorAll('input').forEach(inp => {
+    inp.addEventListener('input', function () {
+      updateItemField(Number(this.dataset.id), this.dataset.field, this.value);
+      // 只需要更新箱数栏与色块，不必整表重绘 (避免输入时失焦)
+      const row = this.closest('tr');
+      const item = AppState.items.find(i => i.id === Number(this.dataset.id));
+      if (item) {
+        const boxCell = row.children[8];
+        const boxesNeeded = (item.totalPcs && item.pcsPerBox) ? Math.ceil(item.totalPcs / item.pcsPerBox) : 0;
+        boxCell.textContent = (boxesNeeded || '—') + (boxesNeeded ? ' 箱' : '');
+      }
+    });
+  });
+  tbody.querySelectorAll('[data-remove]').forEach(btn => {
+    btn.addEventListener('click', function () { removeItemRow(Number(this.dataset.remove)); });
+  });
+}
+
+// 转义 HTML 特殊字元，safe 用于 innerHTML 文字内容或属性值。物品名称/公司名称等使用者输入的
+// 内容一律要经过这个函式再放进 template string，否则若使用者刻意输入 <script> 之类的内容，
+// 会在别人 (包含权限更高的 admin) 浏览器里被当成 HTML/JS 执行 —— 属于储存型 XSS 风险。
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+// escapeAttr 保留给既有呼叫处相容 (行为等同 escapeHtml，名称清楚表示可用在属性值)
+function escapeAttr(s) {
+  return escapeHtml(s);
+}
+
+// ---------- 柜型预设 Container Presets ----------
+function renderContainerPresets() {
+  const wrap = document.getElementById('presetGrid');
+  wrap.innerHTML = '';
+  if (AppState.containerPresets.length === 0) {
+    wrap.innerHTML = '<div style="color:var(--text-secondary); font-size:13px;">正在载入柜型预设... Loading presets...</div>';
+    return;
+  }
+  AppState.containerPresets.forEach(p => {
+    const isActive = AppState.activeContainerIds.has(p._row);
+    const chip = document.createElement('label');
+    chip.className = 'preset-chip' + (isActive ? ' active-chip' : '');
+    chip.innerHTML = `
+      <input type="checkbox" ${isActive ? 'checked' : ''} data-row="${p._row}">
+      <div>
+        <div class="name">${escapeHtml(p['Container Name'])}</div>
+        <div class="dims">${Number(p['Length (cm)'])}×${Number(p['Width (cm)'])}×${Number(p['Height (cm)'])} cm · Max ${Number(p['Max Payload (kg)']).toLocaleString()}kg</div>
+      </div>
+      <button type="button" class="edit-link" data-edit="${p._row}">编辑 Edit</button>
+    `;
+    chip.querySelector('input[type=checkbox]').addEventListener('change', function () {
+      toggleContainerPreset(p._row, this.checked);
+      chip.classList.toggle('active-chip', this.checked);
+    });
+    chip.querySelector('[data-edit]').addEventListener('click', function (e) {
+      e.preventDefault();
+      openContainerModal(p);
+    });
+    wrap.appendChild(chip);
+  });
+
+  const addBtn = document.createElement('button');
+  addBtn.type = 'button';
+  addBtn.className = 'btn-add';
+  addBtn.style.cssText = 'min-width:210px; width:auto; padding:10px 18px;';
+  addBtn.textContent = '+ 新增自定义柜型 Add Custom';
+  addBtn.addEventListener('click', () => openContainerModal(null));
+  wrap.appendChild(addBtn);
+}
+
+// ---------- 柜型新增 / 编辑 Modal ----------
+function openContainerModal(existingData) {
+  const modal = document.getElementById('containerModal');
+  document.getElementById('containerModalTitle').textContent =
+    existingData ? '编辑柜型 Edit Container' : '新增自定义柜型 Add Custom Container';
+  document.getElementById('cModalName').value = existingData ? existingData['Container Name'] : '';
+  document.getElementById('cModalL').value = existingData ? existingData['Length (cm)'] : '';
+  document.getElementById('cModalW').value = existingData ? existingData['Width (cm)'] : '';
+  document.getElementById('cModalH').value = existingData ? existingData['Height (cm)'] : '';
+  document.getElementById('cModalPayload').value = existingData ? existingData['Max Payload (kg)'] : '';
+  modal.dataset.row = existingData ? existingData._row : '';
+  modal.classList.add('show');
+  document.getElementById('cModalName').focus();
+}
+
+function closeContainerModal() {
+  document.getElementById('containerModal').classList.remove('show');
+}
+
+function saveContainerModal() {
+  const modal = document.getElementById('containerModal');
+  const data = {
+    'Container Name': document.getElementById('cModalName').value.trim(),
+    'Length (cm)': Number(document.getElementById('cModalL').value),
+    'Width (cm)': Number(document.getElementById('cModalW').value),
+    'Height (cm)': Number(document.getElementById('cModalH').value),
+    'Max Payload (kg)': Number(document.getElementById('cModalPayload').value) || 999999,
+  };
+  if (!data['Container Name'] || !data['Length (cm)'] || !data['Width (cm)'] || !data['Height (cm)']) {
+    showToast('请完整填写柜型名称与尺寸 Please fill in name and dimensions', true);
+    return;
+  }
+  if (modal.dataset.row) data._row = Number(modal.dataset.row);
+
+  // 共用预设 (没有 Owner) 只有 admin 能改; 一般使用者编辑时改为「另存为自己的柜型」, 不再收到没权限的错误
+  let savedAsCopy = false;
+  if (data._row) {
+    const orig = AppState.containerPresets.find(p => p._row === data._row);
+    const isAdmin = AppState.currentUser && AppState.currentUser['Role'] === 'admin';
+    if (orig && !String(orig['Owner'] || '').trim() && !isAdmin) { delete data._row; savedAsCopy = true; }
+  }
+
+  const saveBtn = document.getElementById('cModalSave');
+  saveBtn.disabled = true;
+  google.script.run
+    .withSuccessHandler(function (all) {
+      saveBtn.disabled = false;
+      const wasNew = !data._row;
+      AppState.containerPresets = all;
+      if (wasNew) {
+        const newest = all[all.length - 1];
+        if (newest) AppState.activeContainerIds.add(newest._row);
+      }
+      renderContainerPresets();
+      closeContainerModal();
+      showToast(savedAsCopy ? '共用柜型不能直接修改，已另存为你自己的柜型 Shared preset copied to your own ✓' : '柜型已保存 Container saved ✓');
+    })
+    .withFailureHandler(function (err) { saveBtn.disabled = false; handleServerError(err); })
+    .saveContainerPreset(AppState.authToken, data);
+}
+
+// ---------- 计算结果 Results ----------
+function renderResults() {
+  const section = document.getElementById('resultsSection');
+  const result = AppState.result;
+  if (!result || result.containers.length === 0) {
+    section.innerHTML = `<div class="empty-state"><div class="crate-big">📦</div>尚无结果，请先完成物品与柜型设定后按下计算按钮<br>No results yet — fill in items and containers, then calculate.</div>`;
+    return;
+  }
+
+  const totalContainers = result.containers.length;
+  const typeCounts = {};
+  result.containers.forEach(c => typeCounts[c.containerType] = (typeCounts[c.containerType] || 0) + 1);
+  const typeSummary = Object.entries(typeCounts).map(([k, v]) => `${v}× ${k}`).join(' + ');
+  const totalBoxes = result.containers.reduce((s, c) => s + c.allocations.reduce((s2, a) => s2 + a.boxesPlaced, 0), 0);
+  const totalPcsPlaced = result.containers.reduce((s, c) => s + c.allocations.reduce((s2, a) => s2 + a.pcsPlaced, 0), 0);
+  const avgUtil = result.containers.reduce((s, c) => s + c.utilization, 0) / totalContainers;
+
+  let html = `
+    <div class="summary-strip">
+      <div class="summary-stat"><div class="label">总集装箱数 Total Containers</div><div class="value" id="statTotalContainers">0</div></div>
+      <div class="summary-stat"><div class="label">柜型组合 Container Mix</div><div class="value" style="font-size:16px;">${typeSummary}</div></div>
+      <div class="summary-stat"><div class="label">总箱数 / PCS Total Boxes / PCS</div><div class="value"><span id="statTotalBoxes">0</span> <small>箱 / <span id="statTotalPcs">0</span> pcs</small></div></div>
+      <div class="summary-stat"><div class="label">平均空间利用率 Avg. Utilization</div><div class="value"><span id="statAvgUtil">0.0</span><small>%</small></div></div>
+    </div>
+  `;
+
+  if (result.unfulfilled.length > 0) {
+    html += `<div class="card" style="border-color:var(--red); background:var(--red-bg);">
+      <strong style="color:var(--red);">⚠ 以下物品尺寸超过所有已选柜型的内部空间，未能安排装载:</strong>
+      <div style="margin-top:6px; font-size:13px; color:var(--red);">${result.unfulfilled.map(i => escapeHtml(i.name) + `（还剩 ${Number(i.boxesRemaining)} 箱未装 undelivered）`).join(', ')}</div>
+    </div>`;
+  }
+
+  html += `<div class="container-strip no-print">`;
+  result.containers.forEach((c, idx) => {
+    const colors = [...new Set(c.allocations.map(a => a.color))];
+    html += `
+      <div class="door-card ${idx === AppState.selectedContainerIndex ? 'selected' : ''}" data-idx="${idx}">
+        <div class="hinge-bar"><span></span><span></span><span></span></div>
+        <div class="plate-id">UNIT · ${String(idx + 1).padStart(2, '0')}</div>
+        <div class="cname">${escapeHtml(c.containerType.split(' ')[0])}</div>
+        <div class="util-bar-track"><div class="util-bar-fill" id="utilBar${idx}" style="width:0%;" data-target="${Math.min(100, c.utilization * 100)}"></div></div>
+        <div class="util-label"><span id="utilLabel${idx}">0.0</span>% 已使用</div>
+        <div class="color-dots">${colors.map(col => `<span style="background:${col}"></span>`).join('')}</div>
+      </div>
+    `;
+  });
+  html += `</div>`;
+
+  html += `<div id="detailPanel"></div>`;
+
+  html += `
+    <div class="action-row no-print">
+      <button class="btn btn-ghost" id="printBtn2">🖨 打印 Print</button>
+      <button class="btn btn-ghost" id="exportPdfBtn2">⬇ 导出 PDF Export as PDF</button>
+      <button class="btn btn-ghost" id="saveHistBtn">💾 保存此次计算 Save Calculation</button>
+    </div>
+  `;
+
+  // 打印用: 逐一列出所有货柜的详细视图 (平常隐藏，只在打印/PDF时生成)
+  html += `<div id="printAllContainers" style="display:none;"></div>`;
+
+  section.innerHTML = html;
+
+  // 数字滚动 + 长条图动画 (视觉效果，数值本身在动画开始前就已经是最终正确值)
+  countUpNumber(document.getElementById('statTotalContainers'), totalContainers, { duration: 550 });
+  countUpNumber(document.getElementById('statTotalBoxes'), totalBoxes, { duration: 650 });
+  countUpNumber(document.getElementById('statTotalPcs'), totalPcsPlaced, { duration: 750 });
+  countUpNumber(document.getElementById('statAvgUtil'), avgUtil * 100, { duration: 850, decimals: 1 });
+  result.containers.forEach((c, idx) => {
+    animateBarWidth(document.getElementById('utilBar' + idx), c.utilization * 100);
+    countUpNumber(document.getElementById('utilLabel' + idx), c.utilization * 100, { duration: 800, decimals: 1 });
+  });
+
+  section.querySelectorAll('.door-card').forEach(card => {
+    card.addEventListener('click', function () {
+      if (Number(this.dataset.idx) === AppState.selectedContainerIndex) return; // 已经选中的货柜，不重复触发过场
+      AppState.selectedContainerIndex = Number(this.dataset.idx);
+      section.querySelectorAll('.door-card').forEach(c => c.classList.remove('selected'));
+      this.classList.add('selected');
+      renderContainerDetail(AppState.selectedContainerIndex);
+      const panel = document.getElementById('detailPanel');
+      if (panel && panel.firstElementChild) playScanSweep(panel.firstElementChild);
+    });
+  });
+  document.getElementById('printBtn2').addEventListener('click', printReport);
+  document.getElementById('exportPdfBtn2').addEventListener('click', exportPdf);
+  document.getElementById('saveHistBtn').addEventListener('click', saveCurrentCalculation);
+
+  renderContainerDetail(AppState.selectedContainerIndex);
+}
+
+function renderContainerDetail(idx) {
+  const panel = document.getElementById('detailPanel');
+  const c = AppState.result.containers[idx];
+  if (!panel || !c) return;
+
+  // 竞态保护：若使用者在视角合集还在非同步生成时又切换到别的货柜，
+  // 旧的 setTimeout 回呼完成时不该再去覆写目前画面的 3D 主视图
+  AppState.detailRenderToken = (AppState.detailRenderToken || 0) + 1;
+  const myToken = AppState.detailRenderToken;
+
+  const utilPct = (c.utilization * 100).toFixed(1);
+  const weightPct = c.maxPayload ? (c.totalWeightUsed / c.maxPayload * 100).toFixed(1) : '—';
+
+  panel.innerHTML = `
+    <div class="detail-panel">
+      <div class="detail-header">
+        <div class="title">集装箱 UNIT #${idx + 1} · ${escapeHtml(c.containerType)}</div>
+        <div class="csc-plate">
+          <span>内尺寸 DIMS: <b>${c.L}×${c.W}×${c.H}</b> cm</span>
+          <span>体积利用 VOL: <b>${utilPct}%</b></span>
+          <span>载重 WT: <b>${c.totalWeightUsed.toLocaleString()} / ${c.maxPayload.toLocaleString()} kg</b> (${weightPct}%)</span>
+        </div>
+      </div>
+      <div class="view-grid">
+        <div class="view-cell">
+          <h4>3D 视图 · 可拖曳旋转 Drag to Rotate</h4>
+          <div class="view-3d-wrap" id="view3dWrap"><span class="drag-hint">🖱 拖曳旋转 · 滚轮缩放</span></div>
+        </div>
+        <div class="view-cell">
+          <h4>侧视图 RIGHT VIEW <span class="mono" style="font-weight:400;">(长度 × 高度 length × height)</span></h4>
+          <canvas class="flatcanvas" id="rightCanvas" width="380" height="300"></canvas>
+          <div class="view-legend" id="rightLegend"></div>
+        </div>
+        <div class="view-cell">
+          <h4>正面视图 FRONT VIEW <span class="mono" style="font-weight:400;">(近柜门 near door)</span></h4>
+          <canvas class="flatcanvas" id="frontCanvas" width="380" height="300"></canvas>
+          <div class="view-legend" id="frontLegend"></div>
+        </div>
+        <div class="view-cell">
+          <h4>背面视图 BACK VIEW <span class="mono" style="font-weight:400;">(柜内最深处 far end)</span></h4>
+          <canvas class="flatcanvas" id="backCanvas" width="380" height="300"></canvas>
+          <div class="view-legend" id="backLegend"></div>
+        </div>
+      </div>
+      <div class="viewpoints-section">
+        <h4 class="viewpoints-title">📷 多角度视角合集 View Points Gallery</h4>
+        <div id="viewPointsGrid"></div>
+      </div>
+      <table class="alloc-table">
+        <thead><tr><th>物品 Item</th><th>箱数 Boxes</th><th>PCS</th><th>排列 Layout (H × V × 深Depth)</th><th>占用长度 Length Used</th><th>离柜门 From Door</th><th>重量 Weight</th></tr></thead>
+        <tbody>
+          ${c.allocations.map(a => `
+            <tr>
+              <td><span class="dot" style="background:${a.color}"></span>${escapeHtml(a.name)}</td>
+              <td class="mono">${a.boxesPlaced}</td>
+              <td class="mono">${a.pcsPlaced.toLocaleString()}</td>
+              <td class="mono">${a.horizontal} × ${a.vertical} × ${a.columns}${a.rotated ? ' (旋转90° rotated)' : ''}</td>
+              <td class="mono">${a.lengthUsed} cm</td>
+              <td class="mono">${a.startLength}–${round2(a.startLength + a.lengthUsed)} cm</td>
+              <td class="mono">${a.boxWeight ? round2(a.boxWeight * a.boxesPlaced) + ' kg' : '—'}</td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+      ${c.utilization < 0.35 ? `<div class="util-warning">⚠ 此货柜空间利用率偏低 (${utilPct}%)，建议考虑并柜或改用较小柜型 Consider consolidating or using a smaller container.</div>` : ''}
+      ${c.utilization >= 0.75 ? `<div class="util-good">✓ 空间利用率良好 Good space utilization</div>` : ''}
+    </div>
+  `;
+
+  render3DView('view3dWrap', c);
+  const frontLayers = buildStackedLayers(c, true);
+  const backLayers = buildStackedLayers(c, false);
+  drawFlatView(document.getElementById('frontCanvas'), c, frontLayers);
+  drawFlatView(document.getElementById('backCanvas'), c, backLayers);
+  drawRightView(document.getElementById('rightCanvas'), c);
+  renderViewLegend('frontLegend', frontLayers);
+  renderViewLegend('backLegend', backLayers);
+  renderRightLegend('rightLegend', c);
+  renderViewPointsGallery(c, myToken);
+}
+
+// Right View 的图例跟 front/back 不同，因为它是沿深度轴的真实剖面，
+// 直接列出该柜每样物品的排列信息即可 (不需要处理堆叠近似)
+function renderRightLegend(elId, c) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  el.innerHTML = c.allocations.map(a => `
+    <div class="legend-row">
+      <span class="legend-dot" style="background:${a.color}"></span>
+      <span class="legend-name">${escapeHtml(a.name)}</span>
+      <span class="legend-meta mono">V${a.vertical} × 深${a.columns} 列</span>
+    </div>
+  `).join('');
+}
+
+// 把截图分成「整柜总览」与「各物品区块特写 (含工人注意事项)」两组
+function buildViewPointsHtml(shots) {
+  const overview = shots.filter(s => s.kind !== 'closeup');
+  const closeups = shots.filter(s => s.kind === 'closeup');
+  let html = '<h5 class="viewpoints-group-title">整柜总览 Overview Angles</h5><div class="viewpoints-grid">' +
+    overview.map(s => `
+      <div class="viewpoint-card">
+        <img src="${s.dataUrl}" alt="${escapeAttr(s.label)}">
+        <div class="viewpoint-label">${escapeHtml(s.label)}</div>
+      </div>`).join('') + '</div>';
+
+  if (closeups.length) {
+    const bySection = {};
+    closeups.forEach(s => { (bySection[s.section] = bySection[s.section] || []).push(s); });
+    html += '<h5 class="viewpoints-group-title">各物品区块特写 Per-Item Close-Ups (混装柜 · 装柜注意)</h5>';
+    Object.keys(bySection).forEach(k => {
+      const group = bySection[k];
+      const info = group[0].info;
+      html += `
+        <div class="section-block" style="border-left:4px solid ${escapeAttr(group[0].color)}">
+          <div class="section-head">
+            <b>Section ${info.section} · ${escapeHtml(info.name)}</b>
+            <span class="mono">${info.pcsPerBox} PCS/箱 · ${info.boxes} 箱 · ${info.pcs.toLocaleString()} PCS · H${info.horizontal}×V${info.vertical}×深${info.columns}${info.weightKg ? ' · ' + info.weightKg + ' kg' : ''}</span>
+          </div>
+          <div class="viewpoints-grid">${group.map(s => `
+            <div class="viewpoint-card">
+              <img src="${s.dataUrl}" alt="${escapeAttr(s.label)}">
+              <div class="viewpoint-label">${escapeHtml(s.angle)}</div>
+            </div>`).join('')}</div>
+          <ul class="section-notes">${info.notes.map(n => '<li>' + escapeHtml(n) + '</li>').join('')}</ul>
+        </div>`;
+    });
+  }
+  return html;
+}
+
+// 渲染多角度视角合集缩图 (每个货柜 6 个固定角度的静态截图)
+function renderViewPointsGallery(c, myToken) {
+  const grid = document.getElementById('viewPointsGrid');
+  if (!grid) return;
+  grid.innerHTML = '<div class="viewpoints-loading">正在生成视角合集... Rendering view points...</div>';
+  setTimeout(function () {
+    const shots = generateContainerViewPoints(c);
+    if (myToken !== AppState.detailRenderToken) return; // 使用者已切换到别的货柜，这份结果已过期，不覆写画面
+    grid.innerHTML = buildViewPointsHtml(shots);
+    render3DView('view3dWrap', c); // 还原主视图的互动镜头角度
+  }, 20);
+}
+
+// 视图下方的文字图例：颜色块 + 产品名 + 每箱 PCS + 该层可见排列 (H×V)
+// 即使箱子在画面上太小画不下文字标签，这里也能清楚对照颜色代表的产品
+function renderViewLegend(elId, layers) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  if (!layers || layers.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = layers.map(l => `
+    <div class="legend-row">
+      <span class="legend-dot" style="background:${l.color}"></span>
+      <span class="legend-name">${escapeHtml(l.name)}</span>
+      <span class="legend-meta mono">${l.pcsPerBox} PCS/箱 · H${l.horizontal}×V${l.vertical}</span>
+    </div>
+  `).join('');
+}
+
+// ---------- 保存计算记录 ----------
+// Google Sheets 单一储存格上限 50000 字元：结果太大时只存物品清单，载入时重新计算即可 (演算法是确定性的)
+const HISTORY_CELL_LIMIT = 45000;
+
+function saveCurrentCalculation() {
+  const result = AppState.result;
+  if (!result) return;
+  const name = prompt('为此次计算命名 Name this calculation:', '装载计算 ' + new Date().toLocaleDateString());
+  if (name === null) return;
+  const summary = {
+    totalItems: AppState.items.length,
+    totalContainers: result.containers.length,
+    summaryText: result.containers.map(c => c.containerType).join(', '),
+  };
+  buildHistoryPayload(AppState.items, result, getShipmentInfo()).then(function (payload) {
+    google.script.run
+      .withSuccessHandler(() => showToast('已保存 Saved ✓'))
+      .withFailureHandler(handleServerError)
+      .saveCalculationHistory(AppState.authToken, name, summary, payload);
+  });
+}
+
+// gzip + base64: 大型结果压缩后通常只有原来的 1/8 左右, 可以完整放进单格
+async function gzipToBase64(str) {
+  const stream = new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'));
+  const buf = new Uint8Array(await new Response(stream).arrayBuffer());
+  let bin = '';
+  for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+async function gunzipFromBase64(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'));
+  const text = await new Response(stream).text();
+  if (text.length > 5000000) throw new Error('record too large');
+  return JSON.parse(text);
+}
+
+// 依序尝试: 完整内容(压缩) → 完整内容(原文) → 物品+货运信息 → 仅物品; 取第一个放得进单格的
+async function buildHistoryPayload(items, result, shipment) {
+  const candidates = [{ items: items, result: result, shipment: shipment }, { items: items, shipment: shipment }, { items: items }];
+  for (const c of candidates) {
+    const json = JSON.stringify(c);
+    if (typeof CompressionStream !== 'undefined') {
+      try {
+        const z = await gzipToBase64(json);
+        if (z.length < HISTORY_CELL_LIMIT) return { v: 2, z: z };
+      } catch (e) { /* 压缩失败就退回原文 */ }
+    }
+    if (json.length < HISTORY_CELL_LIMIT) return c;
+  }
+  return { items: items };
+}
+
+// ---------- 历史记录 ----------
+function openHistoryModal() {
+  const modal = document.getElementById('historyModal');
+  const list = document.getElementById('historyList');
+  modal.classList.add('show');
+  list.textContent = '加载中 Loading...';
+  google.script.run
+    .withSuccessHandler(renderHistoryList)
+    .withFailureHandler(function (err) { list.textContent = ''; handleServerError(err); })
+    .getCalculationHistory(AppState.authToken);
+}
+
+function closeHistoryModal() { document.getElementById('historyModal').classList.remove('show'); }
+
+function renderHistoryList(rows) {
+  const list = document.getElementById('historyList');
+  if (!rows || rows.length === 0) { list.textContent = '暂无记录 No saved calculations yet'; return; }
+  list.innerHTML = rows.map(r => `
+    <div class="history-row">
+      <div class="h-main">
+        <div class="h-name">${escapeHtml(r.name)}</div>
+        <div class="h-meta">${escapeHtml(r.date)}${r.owner && AppState.currentUser && AppState.currentUser['Role'] === 'admin' ? ' · ' + escapeHtml(r.owner) : ''} · ${escapeHtml(r.totalItems)} 物品 items · ${escapeHtml(r.totalContainers)} 柜 containers · ${escapeHtml(r.summary)}</div>
+      </div>
+      <button class="btn btn-primary" data-act="load" data-id="${escapeAttr(r.id || r.row)}">载入 Load</button>
+      <button class="icon-btn" data-act="del" data-id="${escapeAttr(r.id || r.row)}" title="删除 Delete">✕</button>
+    </div>`).join('');
+}
+
+function loadHistoryEntry(id) {
+  google.script.run
+    .withSuccessHandler(function (raw) {
+      const unpack = (raw && raw.z) ? gunzipFromBase64(raw.z) : Promise.resolve(raw);
+      unpack.then(function (data) {
+        if (!data || !Array.isArray(data.items)) throw new Error('bad');
+        // 记录内容不可信 (可能是别的帐号写入的), 一律清洗后才使用
+        AppState.items = sanitizeItems(data.items);
+        itemIdCounter = AppState.items.reduce((m, it) => Math.max(m, it.id), 0) + 1;
+        renderItemsTable();
+        if (data.shipment) applyShipmentInfo(data.shipment);
+        closeHistoryModal();
+        const result = sanitizeResult(data.result);
+        if (result) {
+          AppState.result = result;
+          AppState.selectedContainerIndex = 0;
+          renderResults();
+          showToast('已载入 Loaded ✓');
+        } else {
+          showToast('已载入物品，正在重新计算... Items loaded, recalculating...');
+          runCalculation();
+        }
+      }).catch(function () { showToast('记录内容无法读取 Record unreadable', true); });
+    })
+    .withFailureHandler(handleServerError)
+    .loadCalculation(AppState.authToken, id);
+}
+
+function deleteHistoryEntry(id) {
+  if (!confirm('确定删除这条记录？ Delete this record?')) return;
+  google.script.run
+    .withSuccessHandler(function () { openHistoryModal(); })
+    .withFailureHandler(handleServerError)
+    .deleteCalculationHistory(AppState.authToken, id);
+}
+</script>

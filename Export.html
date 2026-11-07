@@ -1,0 +1,772 @@
+<script>
+/* ============================================================
+   打印与 PDF 导出 Print & PDF Export
+   ============================================================
+   两个功能都需要「逐一」把每个货柜的 3D / 正面 / 背面视图转成
+   静态图片 (因为画面上一次只显示当前选中的那一柜)，
+   转完图后会自动把 3D 交互视图还原回目前选中的货柜。
+   ============================================================ */
+
+function ensureSnapshotWrap() {
+  let wrap = document.getElementById('tempSnapshotWrap');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = 'tempSnapshotWrap';
+    wrap.style.cssText = 'position:fixed; left:-9999px; top:0; width:860px; height:320px;';
+    document.body.appendChild(wrap);
+  }
+  return wrap;
+}
+
+function captureContainerImages(c) {
+  ensureSnapshotWrap();
+  render3DView('tempSnapshotWrap', c);
+  // 3D 截图背景是纯色, 用 JPEG 体积约为 PNG 的 1/6
+  const snap3d = threeRenderer ? threeRenderer.domElement.toDataURL('image/jpeg', 0.85) : '';
+
+  const frontLayers = buildStackedLayers(c, true);
+  const backLayers = buildStackedLayers(c, false);
+
+  const frontCanvas = document.createElement('canvas');
+  drawFlatView(frontCanvas, c, frontLayers, 460, 300);
+  const frontSnap = frontCanvas.toDataURL('image/png');
+
+  const backCanvas = document.createElement('canvas');
+  drawFlatView(backCanvas, c, backLayers, 460, 300);
+  const backSnap = backCanvas.toDataURL('image/png');
+
+  const rightCanvas = document.createElement('canvas');
+  drawRightView(rightCanvas, c, 460, 300);
+  const rightSnap = rightCanvas.toDataURL('image/png');
+
+  const viewPoints = generateContainerViewPoints(c);
+
+  return { snap3d, frontSnap, backSnap, rightSnap, frontLayers, backLayers, viewPoints };
+}
+
+function restoreLiveView() {
+  if (AppState.result && AppState.result.containers[AppState.selectedContainerIndex]) {
+    render3DView('view3dWrap', AppState.result.containers[AppState.selectedContainerIndex]);
+  }
+}
+
+// ============================================================
+//  打印 Print
+// ============================================================
+function printReport() {
+  if (!AppState.result || AppState.result.containers.length === 0) {
+    showToast('请先完成计算 Please run a calculation first', true);
+    return;
+  }
+  showToast('正在准备打印内容... Preparing print view...');
+  setTimeout(function () {
+    generatePrintContent();
+    setTimeout(function () {
+      window.print();
+      restoreLiveView();
+    }, 150);
+  }, 30);
+}
+
+function generatePrintContent() {
+  const wrap = document.getElementById('printAllContainers');
+  let html = `<div class="print-header-block">
+    <h2>集装箱装载计算报告 Container Loading Report</h2>
+    <div class="mono" style="font-size:11px;color:#64748B;">${new Date().toLocaleString()} · 共 ${AppState.result.containers.length} 个集装箱 Total ${AppState.result.containers.length} containers</div>
+  </div>`;
+
+  AppState.result.containers.forEach(function (c, idx) {
+    const imgs = captureContainerImages(c);
+    html += buildPrintBlock(c, idx, imgs);
+  });
+
+  wrap.innerHTML = html;
+}
+
+function buildPrintBlock(c, idx, imgs) {
+  const utilPct = (c.utilization * 100).toFixed(1);
+  return `
+    <div class="detail-panel print-block">
+      <div class="detail-header">
+        <div class="title">集装箱 UNIT #${idx + 1} · ${escapeHtml(c.containerType)}</div>
+        <div class="csc-plate">
+          <span>DIMS: <b>${c.L}×${c.W}×${c.H}</b> cm</span>
+          <span>VOL: <b>${utilPct}%</b></span>
+          <span>WT: <b>${c.totalWeightUsed.toLocaleString()} / ${c.maxPayload.toLocaleString()} kg</b></span>
+        </div>
+      </div>
+      <div class="view-grid">
+        <div class="view-cell"><h4>3D 视图 3D View</h4><img src="${imgs.snap3d}" style="width:100%; border-radius:4px; border:1px solid #DBDFE6;"></div>
+        <div class="view-cell">
+          <h4>侧视图 RIGHT VIEW</h4>
+          <img src="${imgs.rightSnap}" style="width:100%; border:1px solid #DBDFE6; border-radius:4px;">
+        </div>
+        <div class="view-cell">
+          <h4>正面视图 FRONT VIEW</h4>
+          <img src="${imgs.frontSnap}" style="width:100%; border:1px solid #DBDFE6; border-radius:4px;">
+          <div class="view-legend">${buildLegendHtml(imgs.frontLayers)}</div>
+        </div>
+        <div class="view-cell">
+          <h4>背面视图 BACK VIEW</h4>
+          <img src="${imgs.backSnap}" style="width:100%; border:1px solid #DBDFE6; border-radius:4px;">
+          <div class="view-legend">${buildLegendHtml(imgs.backLayers)}</div>
+        </div>
+      </div>
+      <div class="viewpoints-section">
+        <h4 class="viewpoints-title">📷 多角度视角合集 View Points Gallery</h4>
+        ${buildViewPointsHtml(imgs.viewPoints || [])}
+      </div>
+      <table class="alloc-table">
+        <thead><tr><th>物品 Item</th><th>箱数 Boxes</th><th>PCS</th><th>排列 H×V×Depth</th><th>占用长度 Length</th></tr></thead>
+        <tbody>
+          ${c.allocations.map(function (a) {
+            return `<tr><td><span class="dot" style="background:${a.color}"></span>${escapeHtml(a.name)}</td><td class="mono">${a.boxesPlaced}</td><td class="mono">${a.pcsPlaced.toLocaleString()}</td><td class="mono">${a.horizontal}×${a.vertical}×${a.columns}</td><td class="mono">${a.lengthUsed} cm</td></tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function buildLegendHtml(layers) {
+  if (!layers || layers.length === 0) return '';
+  return layers.map(function (l) {
+    return `<div class="legend-row"><span class="legend-dot" style="background:${l.color}"></span><span class="legend-name">${escapeHtml(l.name)}</span><span class="legend-meta mono">${l.pcsPerBox} PCS/箱 · H${l.horizontal}×V${l.vertical}</span></div>`;
+  }).join('');
+}
+
+function hexToRgb(hex) {
+  const h = hex.replace('#', '');
+  const bigint = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+  return [(bigint >> 16) & 255, (bigint >> 8) & 255, bigint & 255];
+}
+
+// ============================================================
+//  中文安全文字渲染 CJK-Safe Text Rendering
+// ============================================================
+//  jsPDF 内建字体 (Helvetica/Times/Courier) 只认识拉丁字母，
+//  只要字串里有中文，doc.text() / doc.autoTable() 画出来就会变乱码。
+//  完整内嵌中文字型档案对 Apps Script 来说太肥大 (常见中文字型
+//  转成 jsPDF 格式后单档就有 4~8MB)，所以改用「跟 2D/3D 视图一样」
+//  的做法：用浏览器原生字体把文字画成图片，再用 addImage 贴进 PDF —
+//  这条路径本来就支援中文 (证据: 画面上的 2D/3D 视图从来没有乱码)。
+//  只有确定是纯 ASCII 的标题/栏名才继续用原生 doc.text (较清晰、档案较小)。
+// ============================================================
+const MM_PER_PT = 0.352778;
+
+// ---------- 原生中文文字 (Supabase/静态版才有) ----------
+//  web/vendor/pdf-font.js 存在时 (window.PdfFont), 导出前会把「这份 PDF 实际用到的字」裁成字体子集嵌入 jsPDF,
+//  文字就是真正的矢量字: 清晰、可选取/搜寻, 体积也远小于「每段文字一张图」。
+//  字体里没有的字 (冷僻字) 或没有载入字体时, 自动退回下面「文字转图片」的做法, 所以任何情况都不会乱码。
+let pdfFont = null;       // { name, chars:Set } —— 本份 PDF 已嵌入的字体与可用字符
+let pdfActiveDoc = null;
+
+function canNative(text) {
+  if (!pdfFont) return false;
+  for (const ch of String(text)) { if (!pdfFont.chars.has(ch)) return false; }
+  return true;
+}
+
+function bytesToBase64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
+
+async function preparePdfFont(doc, shipmentInfo) {
+  pdfFont = null; pdfActiveDoc = doc;
+  if (typeof PdfFont === 'undefined' || !window.PDF_CJK) return;
+  try {
+    const base = await PdfFont.load();
+    const u = Object.assign({}, AppState.currentUser || {}); delete u['LogoDataUrl'];
+    // 可能出现在 PDF 的所有文字: 程序里写死的中文 + ASCII + 使用者资料 (物品名、货运信息、公司、结果)
+    const pool = ' ' + String.fromCharCode.apply(null, Array.from({ length: 95 }, (_, i) => 32 + i)) + (window.PDF_CJK.staticChars || '') +
+      JSON.stringify([shipmentInfo, u, AppState.result, AppState.items]);
+    const need = new Set();
+    for (const ch of pool) { if (base.chars.has(ch)) need.add(ch); }
+    // 拉丁字母/标点/符号区 (U+0020–U+24FF, 几百个字, 每个很小) 一律收进来: 程序里的 · × • — … 等符号不一定会出现在上面的清单里
+    for (const ch of base.chars) { if (ch.codePointAt(0) < 0x2500) need.add(ch); }
+    const bytes = await PdfFont.subset(Array.from(need).join(''));
+    doc.addFileToVFS('NotoSansSC.ttf', bytesToBase64(bytes));
+    doc.addFont('NotoSansSC.ttf', 'NotoSansSC', 'normal');
+    pdfFont = { name: 'NotoSansSC', chars: need };
+  } catch (e) {
+    console.warn('PDF 中文字体不可用, 改用文字转图片 PDF font unavailable, falling back to text images:', e);
+    pdfFont = null;
+  }
+}
+
+function nativeTextWidthMm(text, fontSizePt, bold) {
+  pdfActiveDoc.setFont(pdfFont.name, 'normal');
+  pdfActiveDoc.setFontSize(fontSizePt);
+  return pdfActiveDoc.getTextWidth(String(text)) + (bold ? 0.12 : 0);
+}
+
+// 同一份 PDF 里相同文字 (例如重复出现的物品名) 只描绘一次
+const textImageCache = new Map();
+
+function textToImage(text, fontSizePt, opts) {
+  opts = opts || {};
+  const key = text + '|' + fontSizePt + '|' + (opts.bold ? 1 : 0) + '|' + (opts.color || '');
+  if (textImageCache.has(key)) return textImageCache.get(key);
+  const res = renderTextImage_(text, fontSizePt, opts);
+  textImageCache.set(key, res);
+  return res;
+}
+
+function renderTextImage_(text, fontSizePt, opts) {
+  const scale = 4; // 每 pt 用 4px 描绘，约等同 288dpi，缩小到实际尺寸后仍清晰
+  const fontPx = fontSizePt * scale;
+  const weight = opts.bold ? 700 : 500;
+  const family = '"IBM Plex Sans","Microsoft YaHei","PingFang SC","Noto Sans SC",sans-serif';
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  ctx.font = `${weight} ${fontPx}px ${family}`;
+  const textW = Math.max(1, Math.ceil(ctx.measureText(text).width));
+  const padX = Math.ceil(fontPx * 0.06);
+  canvas.width = textW + padX * 2;
+  canvas.height = Math.ceil(fontPx * 1.32);
+  ctx.font = `${weight} ${fontPx}px ${family}`; // resize 会重置 context 状态，需要重设一次
+  ctx.fillStyle = opts.color || '#1B2A3A';
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';
+  const baselinePx = fontPx * 0.96;
+  ctx.fillText(text, padX, baselinePx);
+  return {
+    dataUrl: canvas.toDataURL('image/png'),
+    mmW: (canvas.width / scale) * MM_PER_PT,
+    mmH: (canvas.height / scale) * MM_PER_PT,
+    baselineMm: (baselinePx / scale) * MM_PER_PT,
+  };
+}
+
+// 用法跟 doc.text(text, x, y) 一致：x/y 是 baseline 的位置 (mm)
+// opts.maxWidthMm: 若图片文字宽度超过此值，等比例缩小 (确保绝不溢出，例如缩图下方的窄栏位标签)
+function pdfText(doc, text, x, y, opts) {
+  opts = opts || {};
+  if (text === null || text === undefined || text === '') return;
+  const fontSizePt = opts.fontSize || 9;
+  if (canNative(text)) { // 字体里都有这些字: 直接写矢量文字 (y 同样是 baseline)
+    const s = String(text);
+    let pt = fontSizePt, w = nativeTextWidthMm(s, pt, opts.bold);
+    if (opts.maxWidthMm && w > opts.maxWidthMm) { pt = pt * opts.maxWidthMm / w; w = opts.maxWidthMm; }
+    pdfActiveDoc.setFont(pdfFont.name, 'normal');
+    pdfActiveDoc.setFontSize(pt);
+    pdfActiveDoc.setTextColor.apply(pdfActiveDoc, hexToRgb(opts.color || '#1B2A3A'));
+    const dx = opts.align === 'center' ? x - w / 2 : (opts.align === 'right' ? x - w : x);
+    pdfActiveDoc.text(s, dx, y);
+    if (opts.bold) pdfActiveDoc.text(s, dx + 0.12, y); // 只嵌了 Regular, 粗体用「错开 0.12mm 再写一次」模拟
+    return;
+  }
+  let img = textToImage(String(text), fontSizePt, opts);
+  if (opts.maxWidthMm && img.mmW > opts.maxWidthMm) {
+    const ratio = opts.maxWidthMm / img.mmW;
+    img = { dataUrl: img.dataUrl, mmW: img.mmW * ratio, mmH: img.mmH * ratio, baselineMm: img.baselineMm * ratio };
+  }
+  let drawX = x;
+  if (opts.align === 'center') drawX = x - img.mmW / 2;
+  else if (opts.align === 'right') drawX = x - img.mmW;
+  doc.addImage(img.dataUrl, 'PNG', drawX, y - img.baselineMm, img.mmW, img.mmH, undefined, 'FAST');
+}
+
+// 用浏览器字体量测文字宽度并换算成 mm (中文量测才准确，用来预先设定 autoTable 栏宽)
+function measureTextMm(text, fontSizePt, bold) {
+  if (canNative(text)) return nativeTextWidthMm(text, fontSizePt, bold);
+  if (!measureTextMm._ctx) measureTextMm._ctx = document.createElement('canvas').getContext('2d');
+  const ctx = measureTextMm._ctx;
+  const fontPx = fontSizePt * (96 / 72);
+  ctx.font = `${bold ? 700 : 500} ${fontPx}px "IBM Plex Sans","Microsoft YaHei","PingFang SC",sans-serif`;
+  return ctx.measureText(String(text)).width * (25.4 / 96);
+}
+
+// doc.autoTable 的中文安全包装版：cjkColumns 指定的栏位改用图片方式画字，
+// 其余栏位 (数字/纯英文) 维持原生文字 (较清晰、档案也较小)
+function autoTableCJK(doc, opts) {
+  const cjkCols = opts.cjkColumns || [];
+  delete opts.cjkColumns;
+
+  // 预先用 canvas 量测中文栏位实际所需宽度，避免 autoTable 用 Helvetica
+  // 量测中文 (通常严重失准) 导致栏位被压得过窄、图片文字被裁切
+  opts.columnStyles = opts.columnStyles || {};
+  const baseFontSize = (opts.styles && opts.styles.fontSize) || 10; // autoTable 未指定时的预设字号是 10pt (量测用 9 会量得太窄, 原生文字就被折行)
+  cjkCols.forEach(function (colIdx) {
+    const existing = opts.columnStyles[colIdx] || {};
+    if (existing.cellWidth !== undefined) return; // 呼叫端已指定明确栏宽 (例如要跟旁边表格对齐)，尊重该设定，不要覆写
+    let maxW = 0;
+    (opts.body || []).forEach(function (row) {
+      const val = row[colIdx];
+      if (val !== undefined && val !== null && val !== '') maxW = Math.max(maxW, measureTextMm(val, baseFontSize));
+    });
+    // 表头是 autoTable 用 Helvetica 粗体原生绘制的 (不是图片/中文字体), 要用同样的字体量测, 否则表头会被折行 (如 DRAWN → DRA/WN)
+    const headLabel = opts.head && opts.head[0] && opts.head[0][colIdx];
+    if (headLabel) {
+      doc.setFont('helvetica', 'bold'); doc.setFontSize(baseFontSize);
+      maxW = Math.max(maxW, doc.getTextWidth(String(headLabel).split('\n').sort(function (a, b) { return b.length - a.length; })[0]));
+    }
+    // 左右内距: 呼叫端有指定 cellPadding 就照它算, 否则以 3mm 估计
+    const pad = (opts.styles && typeof opts.styles.cellPadding === 'number') ? opts.styles.cellPadding : 3;
+    opts.columnStyles[colIdx] = Object.assign({}, existing, { cellWidth: Math.min(maxW + pad * 2 + 2, 80) });
+  });
+
+  const originalWillDrawCell = opts.willDrawCell;
+  const originalDidDrawCell = opts.didDrawCell;
+
+  // 字体里都有的字: 直接让 autoTable 用嵌入的中文字体画原生文字; 其余 (冷僻字/没载入字体) 才走图片
+  const isNativeCell = function (data) {
+    return cjkCols.includes(data.column.index) && data.cell.section === 'body' && canNative(data.cell.raw == null ? '' : data.cell.raw);
+  };
+  const originalDidParseCell = opts.didParseCell;
+  opts.didParseCell = function (data) {
+    if (originalDidParseCell) originalDidParseCell(data);
+    if (isNativeCell(data)) { data.cell.styles.font = pdfFont.name; data.cell.styles.fontStyle = 'normal'; }
+  };
+  opts.willDrawCell = function (data) {
+    if (originalWillDrawCell) originalWillDrawCell(data);
+    if (cjkCols.includes(data.column.index) && data.cell.section === 'body' && !isNativeCell(data)) {
+      data.cell.text = ['']; // 清空原生文字 (避免乱码)，但保留 1 行高度让版面不跑掉
+    }
+  };
+  opts.didDrawCell = function (data) {
+    if (cjkCols.includes(data.column.index) && data.cell.section === 'body' && !isNativeCell(data)) {
+      const raw = data.cell.raw;
+      if (raw !== undefined && raw !== null && raw !== '') {
+        const fontSizePt = data.cell.styles.fontSize || baseFontSize;
+        const halign = data.cell.styles.halign || 'left';
+        let x;
+        if (halign === 'center') x = data.cell.x + data.cell.width / 2;
+        else if (halign === 'right') x = data.cell.x + data.cell.width - data.cell.padding('right');
+        else x = data.cell.x + data.cell.padding('left');
+        const y = data.cell.y + data.cell.height / 2 + fontSizePt * MM_PER_PT * 0.32;
+        // 长文字缩小到放得进格子, 不再溢出到隔壁栏位
+        const maxW = data.cell.width - data.cell.padding('left') - data.cell.padding('right');
+        pdfText(doc, raw, x, y, { fontSize: fontSizePt, align: halign, color: '#1B2A3A', maxWidthMm: maxW });
+      }
+    }
+    if (originalDidDrawCell) originalDidDrawCell(data);
+  };
+
+  doc.autoTable(opts);
+}
+
+// ============================================================
+//  导出 PDF Export PDF
+// ============================================================
+const CIRCLED_NUMS = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨'];
+
+// 预先载入 Logo 图片以取得其原始宽高比，避免直接塞进 addImage 导致变形
+function loadImageAspect(dataUrl) {
+  return new Promise(function (resolve) {
+    if (!dataUrl) { resolve(null); return; }
+    const img = new Image();
+    img.onload = function () { resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
+    img.onerror = function () { resolve(null); };
+    img.src = dataUrl;
+  });
+}
+
+function exportPdf() {
+  if (!AppState.result || AppState.result.containers.length === 0) {
+    showToast('请先完成计算 Please run a calculation first', true);
+    return;
+  }
+  if (typeof window.jspdf === 'undefined') {
+    showToast('PDF 引擎载入中，请稍候再试一次 PDF engine still loading, please try again shortly', true);
+    return;
+  }
+  showToast('正在生成 PDF... Generating PDF, please wait...');
+  const shipmentInfo = getShipmentInfo();
+  setTimeout(function () {
+    const logoUrl = (AppState.currentUser && AppState.currentUser['LogoDataUrl']) || '';
+    loadImageAspect(logoUrl).then(function (logoAspect) {
+      buildPdf(shipmentInfo, logoAspect).catch(function (err) {
+        console.error(err);
+        showToast('PDF 生成失败 PDF generation failed: ' + err.message, true);
+        restoreLiveView();
+      });
+    });
+  }, 30);
+}
+
+// ---------- 报告表头 (公司 Logo / 名称 / 地址) Report Letterhead ----------
+function drawCompanyHeader(doc, pageW, margin, logoAspect) {
+  const user = AppState.currentUser || {};
+  let y = margin;
+  let textX = margin;
+
+  if (user['LogoDataUrl'] && logoAspect) {
+    const maxW = 30, maxH = 16;
+    let w = maxW, h = maxW / (logoAspect.w / logoAspect.h);
+    if (h > maxH) { h = maxH; w = maxH * (logoAspect.w / logoAspect.h); }
+    doc.addImage(user['LogoDataUrl'], margin, y, w, h);
+    textX = margin + w + 6;
+  }
+
+  pdfText(doc, user['CompanyName'] || '(未设定公司名称 Company name not set)', textX, y + 6, { fontSize: 15, bold: true, color: '#1B2A3A' });
+  if (user['CompanyAddress']) {
+    pdfText(doc, user['CompanyAddress'], textX, y + 12, { fontSize: 9, color: '#64748B' });
+  }
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(148, 163, 184);
+  doc.text(formatDateAscii(new Date()), pageW - margin, y + 4, { align: 'right' });
+  doc.text('Prepared by: ' + (user['Email'] || ''), pageW - margin, y + 8, { align: 'right' });
+
+  y += 20;
+  doc.setDrawColor(27, 42, 58);
+  doc.setLineWidth(0.6);
+  doc.line(margin, y, pageW - margin, y);
+  y += 6;
+
+  pdfText(doc, '集装箱装载方案 CONTAINER LOADING METHOD', pageW / 2, y + 2, { fontSize: 13, bold: true, align: 'center', color: '#1B2A3A' });
+  y += 9;
+  return y;
+}
+
+// ---------- Shipping Information 表 ----------
+function drawShippingInfoTable(doc, x, y, w, shipInfo, containerType) {
+  const labelW = w * 0.4;
+  autoTableCJK(doc, {
+    startY: y, margin: { left: x }, tableWidth: w, theme: 'grid',
+    styles: { fontSize: 8, cellPadding: 1.6 },
+    columnStyles: { 0: { fontStyle: 'bold', fillColor: [245, 247, 250], cellWidth: labelW }, 1: { cellWidth: w - labelW } },
+    cjkColumns: [1],
+    body: [
+      ['Customer', shipInfo.customer || '-'],
+      ['ETD', shipInfo.etd || '-'],
+      ['ETA', shipInfo.eta || '-'],
+      ['Shipping Line', shipInfo.shippingLine || '-'],
+      ['Container Size', containerType],
+      ['Remark', shipInfo.remark || '-'],
+    ],
+  });
+  return doc.lastAutoTable.finalY;
+}
+
+// ---------- Shipping ITEM 表 (①②③... 编号，箱规以 mm 显示) ----------
+function drawShippingItemTable(doc, x, y, w, allocations) {
+  const shown = allocations.slice(0, CIRCLED_NUMS.length);
+  autoTableCJK(doc, {
+    startY: y, margin: { left: x }, tableWidth: w, theme: 'grid',
+    styles: { fontSize: 7.5, cellPadding: 1.6, halign: 'center' },
+    headStyles: { fillColor: [27, 42, 58], halign: 'center' },
+    head: [['No.', 'Part Name', 'Qty', 'Carton Qty\n(Case)', 'Box Size (1Box)\nL×W×H (mm)']],
+    cjkColumns: [0, 1], // 第 0 栏的 ①②③ 不在 PDF 内建字体里, 必须走图片方式才不会乱码
+    columnStyles: { 0: { cellWidth: w * 0.09 }, 1: { halign: 'left', cellWidth: w * 0.33 } },
+    body: shown.map(function (a, i) {
+      return [
+        CIRCLED_NUMS[i], a.name, a.pcsPlaced.toLocaleString(), a.boxesPlaced.toLocaleString(),
+        Math.round(a.boxL * 10) + '×' + Math.round(a.boxW * 10) + '×' + Math.round(a.boxH * 10),
+      ];
+    }),
+  });
+  let finalY = doc.lastAutoTable.finalY;
+  if (allocations.length > CIRCLED_NUMS.length) {
+    pdfText(doc, '+ ' + (allocations.length - CIRCLED_NUMS.length) + ' more items (see allocation table below)', x, finalY + 4, { fontSize: 7, color: '#94A3B8' });
+    finalY += 5;
+  }
+  return finalY;
+}
+
+// ---------- Accessory 表 ----------
+function drawAccessoryTable(doc, x, y, w, accessories) {
+  pdfText(doc, 'ACCESSORY', x, y, { fontSize: 8.5, bold: true, color: '#1B2A3A' });
+  y += 3;
+  autoTableCJK(doc, {
+    startY: y, margin: { left: x }, tableWidth: w, theme: 'grid',
+    styles: { fontSize: 7.5, cellPadding: 1.6 },
+    headStyles: { fillColor: [27, 42, 58] },
+    head: [['Accessory', 'Qty']],
+    cjkColumns: [0],
+    body: (accessories && accessories.length > 0) ? accessories.map(function (a) { return [a.name, a.qty || '-']; }) : [['-', '-']],
+  });
+  return doc.lastAutoTable.finalY;
+}
+
+// ---------- Drawn / Checked / Confirmed 签名表 ----------
+function drawSignatureTable(doc, x, y, w, shipInfo) {
+  pdfText(doc, 'SIGN-OFF', x, y, { fontSize: 8.5, bold: true, color: '#1B2A3A' });
+  y += 3;
+  autoTableCJK(doc, {
+    startY: y, margin: { left: x }, tableWidth: w, theme: 'grid',
+    styles: { fontSize: 8, cellPadding: 4, halign: 'center', minCellHeight: 14 },
+    headStyles: { fillColor: [27, 42, 58] },
+    head: [['DRAWN', 'CHECKED', 'CONFIRMED']],
+    cjkColumns: [0, 1, 2],
+    body: [[shipInfo.drawn || '', shipInfo.checked || '', shipInfo.confirmed || '']],
+  });
+  return doc.lastAutoTable.finalY;
+}
+
+// A3 横向 (420 × 297 mm)，跟参考样本的横向版面一致。要改成直向只需把下面改成 'portrait'。
+const PDF_FORMAT = 'a3';
+const PDF_ORIENTATION = 'landscape';
+
+function imgFormatOf(dataUrl) { return String(dataUrl).indexOf('image/jpeg') > -1 ? 'JPEG' : 'PNG'; }
+
+// 依字元宽度折行 (中文没有空格，必须逐字量测)
+function wrapTextMm(text, maxMm, fontSizePt) {
+  const lines = [];
+  let cur = '';
+  for (const ch of String(text)) {
+    if (cur && measureTextMm(cur + ch, fontSizePt) > maxMm) { lines.push(cur); cur = ch; } else cur += ch;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// 画一组折行文字，回传新的 y。lines 已折行
+function drawLines(doc, lines, x, y, fontSize, lineH, opts) {
+  lines.forEach(function (ln, i) { pdfText(doc, ln, x, y + i * lineH, Object.assign({ fontSize: fontSize }, opts || {})); });
+  return y + lines.length * lineH;
+}
+
+// 次页精简页眉 (公司名 + 日期 + 页标题)，回传内容起始 y
+function drawMiniHeader(doc, pageW, margin, title) {
+  const user = AppState.currentUser || {};
+  pdfText(doc, user['CompanyName'] || '', margin, margin + 4, { fontSize: 10, bold: true, color: '#1B2A3A' });
+  pdfText(doc, title, pageW / 2, margin + 4, { fontSize: 11, bold: true, align: 'center', color: '#1B2A3A' });
+  doc.setFont('helvetica', 'normal'); doc.setFontSize(8); doc.setTextColor(148, 163, 184);
+  doc.text(formatDateAscii(new Date()), pageW - margin, margin + 4, { align: 'right' });
+  doc.setDrawColor(27, 42, 58); doc.setLineWidth(0.4);
+  doc.line(margin, margin + 7, pageW - margin, margin + 7);
+  return margin + 12;
+}
+
+// 单一区块说明表 (混装柜的「装柜顺序与工人注意事项」)
+function drawSectionSummaryTable(doc, margin, y, c) {
+  autoTableCJK(doc, {
+    startY: y, margin: { left: margin, right: margin }, theme: 'grid',
+    styles: { fontSize: 8, cellPadding: 1.6 },
+    headStyles: { fillColor: [27, 42, 58] },
+    head: [['Sec.', 'Item', 'PCS/Box', 'Boxes', 'PCS', 'Layout H x V x Depth', 'Orientation', 'From Door (cm)', 'Height (cm)', 'Weight (kg)']],
+    cjkColumns: [0, 1, 6], // 第 0 栏有 ①②③ (见上)
+    body: c.allocations.map(function (a, i) {
+      const d = describeAllocation(a, c, i);
+      return [CIRCLED_NUMS[i] || String(i + 1), a.name, d.pcsPerBox, a.boxesPlaced, a.pcsPlaced.toLocaleString(),
+        a.horizontal + ' x ' + a.vertical + ' x ' + a.columns, a.rotated ? '横放旋转90° Rotated' : '正放 Standard',
+        d.startLength + ' - ' + d.endLength, d.blockHeight, d.weightKg || '-'];
+    }),
+  });
+  return doc.lastAutoTable.finalY;
+}
+
+// 让出主线程给浏览器重绘, 并在提示里显示进度 (大量货柜时避免页面看起来卡死)
+function yieldUi(msg) {
+  if (msg) showToast(msg);
+  return new Promise(function (resolve) { setTimeout(resolve, 20); });
+}
+
+async function buildPdf(shipmentInfo, logoAspect) {
+  const { jsPDF } = window.jspdf;
+  // compress: true 会压缩页面内容流 (文字/线条/表格), 实测纯矢量页可从 92KB 降到 9KB
+  const doc = new jsPDF({ orientation: PDF_ORIENTATION, unit: 'mm', format: PDF_FORMAT, compress: true });
+  textImageCache.clear();
+  await preparePdfFont(doc, shipmentInfo); // 静态版: 嵌入本份 PDF 用到的中文字体子集; Apps Script 版直接略过 (走文字转图片)
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  const margin = 14;
+  const usableW = pageW - margin * 2;
+  const bottomLimit = pageH - margin;
+  let firstPage = true;
+  function newPage() { if (firstPage) firstPage = false; else doc.addPage(); }
+
+  // 多货柜时，先放一页总览
+  if (AppState.result.containers.length > 1) {
+    newPage();
+    let y = drawCompanyHeader(doc, pageW, margin, logoAspect);
+    const totalContainers = AppState.result.containers.length;
+    const typeCounts = {};
+    AppState.result.containers.forEach(function (c) { typeCounts[c.containerType] = (typeCounts[c.containerType] || 0) + 1; });
+    const typeSummary = Object.entries(typeCounts).map(function (e) { return e[1] + 'x ' + e[0]; }).join('  +  ');
+
+    autoTableCJK(doc, {
+      startY: y, margin: { left: margin, right: margin }, theme: 'grid',
+      cjkColumns: [1],
+      body: [
+        ['Total Containers', String(totalContainers)],
+        ['Container Mix', typeSummary],
+        ['Avg. Utilization', (AppState.result.containers.reduce(function (s, c) { return s + c.utilization; }, 0) / totalContainers * 100).toFixed(1) + '%'],
+      ],
+    });
+    y = doc.lastAutoTable.finalY + 8;
+
+    doc.setFont('helvetica', 'bold'); doc.setFontSize(11); doc.setTextColor(27, 42, 58);
+    doc.text('Full Item List (All Containers)', margin, y);
+    y += 4;
+    autoTableCJK(doc, {
+      startY: y, margin: { left: margin, right: margin },
+      head: [['Item', 'Total PCS', 'PCS/Box', 'Box L x W x H (cm)', 'Boxes Needed']],
+      headStyles: { fillColor: [27, 42, 58] },
+      cjkColumns: [0],
+      body: (AppState.result._items || AppState.items).map(function (it) {
+        return [it.name, it.totalPcs, it.pcsPerBox, it.boxL + 'x' + it.boxW + 'x' + it.boxH, Math.ceil(it.totalPcs / it.pcsPerBox)];
+      }),
+    });
+
+    if (AppState.result.unfulfilled.length > 0) {
+      y = doc.lastAutoTable.finalY + 6;
+      doc.setFont('helvetica', 'normal'); doc.setTextColor(192, 57, 43); doc.setFontSize(9);
+      doc.text('Warning: some items exceed all selected container sizes and could not be placed:', margin, y);
+      y += 5;
+      pdfText(doc, AppState.result.unfulfilled.map(function (i) { return i.name; }).join(', '), margin, y, { fontSize: 9, color: '#C0392B' });
+    }
+  }
+
+  for (let idx = 0; idx < AppState.result.containers.length; idx++) {
+    const c = AppState.result.containers[idx];
+    await yieldUi('正在生成 PDF ' + (idx + 1) + '/' + AppState.result.containers.length + '... Generating PDF');
+    // ================= 第 1 页: 样本版面 (信息表 + 6 视图) =================
+    newPage();
+    let y = drawCompanyHeader(doc, pageW, margin, logoAspect);
+
+    // 三栏: Shipping Information | Shipping ITEM | Accessory + Sign-off
+    const gap = 6;
+    const colAW = 84, colCW = 110;
+    const colBW = usableW - colAW - colCW - gap * 2;
+    const yAfterInfo = drawShippingInfoTable(doc, margin, y, colAW, shipmentInfo, c.containerType);
+    const yAfterItems = drawShippingItemTable(doc, margin + colAW + gap, y, colBW, c.allocations);
+    const rx = margin + colAW + colBW + gap * 2;
+    const yAfterAcc = drawAccessoryTable(doc, rx, y + 3, colCW, shipmentInfo.accessories);
+    const yAfterSign = drawSignatureTable(doc, rx, yAfterAcc + 5, colCW, shipmentInfo);
+    y = Math.max(yAfterInfo, yAfterItems, yAfterSign) + 6;
+
+    pdfText(doc, 'UNIT #' + (idx + 1) + '  ·  ' + c.containerType, margin, y, { fontSize: 11, bold: true, color: '#1B2A3A' });
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(8.5); doc.setTextColor(100, 116, 139);
+    doc.text(
+      'Dims: ' + c.L + 'x' + c.W + 'x' + c.H + ' cm   |   Volume Util: ' + (c.utilization * 100).toFixed(1) +
+      '%   |   Weight: ' + c.totalWeightUsed.toLocaleString() + ' / ' + c.maxPayload.toLocaleString() + ' kg   |   Door end = left of Right View',
+      margin + 70, y
+    );
+    y += 4;
+
+    const imgs = captureContainerImages(c);
+
+    // 依剩余页高等比缩放，保证 2 排视图 + 图例装得进同一页
+    const legendRoom = 16;
+    let rowH = Math.min(78, (bottomLimit - y - legendRoom - 6) / 2);
+    const w3d = rowH * (860 / 320), wRight = rowH * (460 / 300);
+    doc.addImage(imgs.snap3d, imgFormatOf(imgs.snap3d), margin, y, w3d, rowH);
+    doc.addImage(imgs.rightSnap, 'PNG', margin + w3d + gap, y, wRight, rowH, undefined, 'FAST');
+    // 第一排右侧空白处: 区块摘要小表 (Section / 名称 / 起讫)
+    const sx = margin + w3d + wRight + gap * 2;
+    const sw = pageW - margin - sx;
+    if (sw > 50) {
+      c.allocations.slice(0, 9).forEach(function (a, i) {
+        const ly = y + 4 + i * 5.2;
+        doc.setFillColor.apply(doc, hexToRgb(a.color));
+        doc.rect(sx, ly - 2.8, 3, 3, 'F');
+        pdfText(doc, (CIRCLED_NUMS[i] || (i + 1)) + ' ' + a.name + '  ' + a.startLength + '-' + round2(a.startLength + a.lengthUsed) + ' cm', sx + 5, ly, { fontSize: 7.5, maxWidthMm: sw - 6 });
+      });
+    }
+    y += rowH + 6;
+
+    const wFB = rowH * (460 / 300);
+    doc.addImage(imgs.frontSnap, 'PNG', margin, y, wFB, rowH, undefined, 'FAST');
+    doc.addImage(imgs.backSnap, 'PNG', margin + wFB + gap, y, wFB, rowH, undefined, 'FAST');
+    const lx0 = margin + (wFB + gap) * 2;
+    pdfText(doc, 'FRONT (door end)', margin, y - 1.2, { fontSize: 7, color: '#64748B' });
+    pdfText(doc, 'BACK (far end)', margin + wFB + gap, y - 1.2, { fontSize: 7, color: '#64748B' });
+    // 第二排右侧: 前/后视图图例
+    const legW = pageW - margin - lx0;
+    const lineH = 4.6;
+    let ly = y + 4;
+    [['FRONT VIEW', imgs.frontLayers], ['BACK VIEW', imgs.backLayers]].forEach(function (pair) {
+      pdfText(doc, pair[0], lx0, ly, { fontSize: 8, bold: true, color: '#1B2A3A' });
+      ly += lineH;
+      pair[1].forEach(function (l) {
+        doc.setFillColor.apply(doc, hexToRgb(l.color));
+        doc.rect(lx0, ly - 2.6, 2.6, 2.6, 'F');
+        pdfText(doc, l.name + '  (' + l.pcsPerBox + ' PCS/box, H' + l.horizontal + '×V' + l.vertical + ')', lx0 + 4, ly, { fontSize: 7.5, maxWidthMm: legW - 4 });
+        ly += lineH;
+      });
+      ly += 2;
+    });
+
+    // ================= 第 2 页: 装柜顺序 + 工人注意事项总表 =================
+    doc.addPage();
+    let sy = drawMiniHeader(doc, pageW, margin, 'UNIT #' + (idx + 1) + ' · ' + c.containerType + ' · Loading Sequence & Worker Notes 装柜顺序与注意事项');
+    sy = drawSectionSummaryTable(doc, margin, sy, c) + 8;
+    c.allocations.forEach(function (a, i) {
+      const d = describeAllocation(a, c, i);
+      const colW = usableW - 8;
+      const lines = [];
+      d.notes.forEach(function (n) { wrapTextMm(n, colW, 8.5).forEach(function (ln, k) { lines.push((k === 0 ? '• ' : '   ') + ln); }); });
+      const need = 8 + lines.length * 4.6 + 6;
+      if (sy + need > bottomLimit) { doc.addPage(); sy = drawMiniHeader(doc, pageW, margin, 'UNIT #' + (idx + 1) + ' · Worker Notes (cont.)'); }
+      doc.setFillColor.apply(doc, hexToRgb(a.color));
+      doc.rect(margin, sy - 3.4, 4, 4, 'F');
+      pdfText(doc, 'Section ' + (i + 1) + ' · ' + a.name + '   (' + d.pcsPerBox + ' PCS/box · ' + d.boxDims + ' cm · ' + a.horizontal + 'x' + a.vertical + 'x' + a.columns + ')', margin + 6, sy, { fontSize: 9.5, bold: true, color: '#1B2A3A' });
+      sy += 6;
+      sy = drawLines(doc, lines, margin + 4, sy, 8.5, 4.6, { color: '#334155' }) + 5;
+    });
+
+    // ================= 视角合集页: 总览 (3×2) =================
+    const overview = (imgs.viewPoints || []).filter(function (s) { return s.kind !== 'closeup'; });
+    if (overview.length > 0) {
+      doc.addPage();
+      let vy = drawMiniHeader(doc, pageW, margin, 'UNIT #' + (idx + 1) + ' · View Points 视角总览');
+      const cols = 3, gapV = 6;
+      const thumbW = (usableW - gapV * (cols - 1)) / cols;
+      const thumbH = thumbW / (840 / 600);
+      overview.forEach(function (s, i) {
+        const col = i % cols, row = Math.floor(i / cols);
+        const tx = margin + col * (thumbW + gapV);
+        const ty = vy + row * (thumbH + 12);
+        doc.addImage(s.dataUrl, imgFormatOf(s.dataUrl), tx, ty, thumbW, thumbH);
+        doc.setDrawColor(27, 42, 58); doc.setLineWidth(0.3); doc.rect(tx, ty, thumbW, thumbH);
+        pdfText(doc, s.label, tx, ty + thumbH + 4.5, { fontSize: 8.5, bold: true, color: '#1B2A3A', maxWidthMm: thumbW });
+      });
+    }
+
+    // ================= 视角合集页: 各物品区块特写 (每区块 3 角度 + 注意事项) =================
+    const closeups = (imgs.viewPoints || []).filter(function (s) { return s.kind === 'closeup'; });
+    if (closeups.length > 0) {
+      const bySection = {};
+      closeups.forEach(function (s) { (bySection[s.section] = bySection[s.section] || []).push(s); });
+      let cy2 = null;
+      Object.keys(bySection).forEach(function (k) {
+        const group = bySection[k];
+        const info = group[0].info;
+        const thumbW = (usableW - 12) / 3;
+        const thumbH = thumbW / (840 / 600);
+        const halfCol = (usableW - 8) / 2;
+        const noteLines = [];
+        info.notes.forEach(function (n) { wrapTextMm(n, halfCol - 4, 8).forEach(function (ln, m) { noteLines.push((m === 0 ? '• ' : '   ') + ln); }); });
+        const half = Math.ceil(noteLines.length / 2);
+        const need = 9 + thumbH + 8 + half * 4.2 + 6;
+        if (cy2 === null || cy2 + need > bottomLimit) {
+          doc.addPage();
+          cy2 = drawMiniHeader(doc, pageW, margin, 'UNIT #' + (idx + 1) + ' · Per-Item Close-Ups 各物品区块特写');
+        }
+        doc.setFillColor.apply(doc, hexToRgb(group[0].color));
+        doc.rect(margin, cy2 - 3.4, 4, 4, 'F');
+        pdfText(doc, 'Section ' + info.section + ' · ' + info.name + '   —   ' + info.pcsPerBox + ' PCS/box · ' + info.boxes + ' boxes · ' + info.pcs.toLocaleString() + ' PCS · H' + info.horizontal + 'xV' + info.vertical + 'xDepth' + info.columns + ' · ' + info.startLength + '-' + info.endLength + ' cm from door' + (info.weightKg ? ' · ' + info.weightKg + ' kg' : ''), margin + 6, cy2, { fontSize: 9.5, bold: true, color: '#1B2A3A', maxWidthMm: usableW - 8 });
+        cy2 += 3;
+        group.forEach(function (s, m) {
+          const tx = margin + m * (thumbW + 6);
+          doc.addImage(s.dataUrl, imgFormatOf(s.dataUrl), tx, cy2, thumbW, thumbH);
+          doc.setDrawColor.apply(doc, hexToRgb(s.color)); doc.setLineWidth(0.6); doc.rect(tx, cy2, thumbW, thumbH);
+          pdfText(doc, s.angle, tx + 1.5, cy2 + thumbH - 2, { fontSize: 8, bold: true, color: '#1B2A3A' });
+        });
+        cy2 += thumbH + 5;
+        drawLines(doc, noteLines.slice(0, half), margin + 2, cy2, 8, 4.2, { color: '#334155' });
+        drawLines(doc, noteLines.slice(half), margin + 2 + halfCol + 4, cy2, 8, 4.2, { color: '#334155' });
+        cy2 += half * 4.2 + 9;
+      });
+    }
+  }
+
+  restoreLiveView();
+  pdfFont = null; pdfActiveDoc = null;
+  doc.save('container-loading-plan-A3-' + Date.now() + '.pdf');
+  showToast('PDF 已下载 (A3) PDF downloaded ✓');
+}
+
+// 固定用英文格式输出日期时间，避免浏览器语系为中文时 toLocaleString() 混入中文字样
+function formatDateAscii(d) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const pad = n => String(n).padStart(2, '0');
+  return `${months[d.getMonth()]} ${pad(d.getDate())}, ${d.getFullYear()}  ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+</script>

@@ -1,0 +1,173 @@
+<script>
+/* ============================================================
+   科技感特效工具 Tech Effect Utilities
+   ============================================================
+   共用的轻量动画函式，给结果面板、登入画面、管理后台等各处呼叫:
+   - countUpNumber: 数字从 0 滚动到目标值
+   - animateBarWidth: 长条图从 0% 平滑长到目标宽度 (搭配 CSS transition)
+   - attachRippleEffect: 按钮点击时的涟漪扩散效果
+   - fadeSwitchScreen: 画面切换时的淡入淡出转场
+   ============================================================ */
+
+// 数字滚动计数动画。el 内文字若含非数字字元 (例如 "50.0%")，会保留那些字元原样，只滚动数字部分。
+function countUpNumber(el, target, opts) {
+  if (!el) return;
+  opts = opts || {};
+  const duration = opts.duration || 700;
+  const decimals = opts.decimals !== undefined ? opts.decimals : 0;
+  const prefix = opts.prefix || '';
+  const suffix = opts.suffix || '';
+  const start = 0;
+  const startTime = performance.now();
+
+  function easeOutCubic(t) { return 1 - Math.pow(1 - t, 3); }
+
+  function tick(now) {
+    const t = Math.min(1, (now - startTime) / duration);
+    const eased = easeOutCubic(t);
+    const value = start + (target - start) * eased;
+    el.textContent = prefix + value.toFixed(decimals) + suffix;
+    if (t < 1) requestAnimationFrame(tick);
+    else el.textContent = prefix + target.toFixed(decimals) + suffix;
+  }
+  requestAnimationFrame(tick);
+}
+
+// 长条图从 0 宽度平滑长到目标宽度 (CSS 已经有 transition: width，这里只是延迟一帧改 style.width 来触发它)
+function animateBarWidth(el, targetPercent) {
+  if (!el) return;
+  el.style.width = '0%';
+  requestAnimationFrame(function () {
+    requestAnimationFrame(function () {
+      el.style.width = Math.min(100, targetPercent) + '%';
+    });
+  });
+}
+
+// 按钮涟漪点击效果：用事件委派绑在 document 上，套用在所有既有的按钮 class 上
+function attachRippleEffect() {
+  document.addEventListener('click', function (e) {
+    const target = e.target.closest('.btn, .btn-calc, .user-menu-btn, .icon-btn');
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const size = Math.max(rect.width, rect.height);
+    const span = document.createElement('span');
+    span.className = 'ripple-dot';
+    span.style.width = span.style.height = size + 'px';
+    span.style.left = (e.clientX - rect.left - size / 2) + 'px';
+    span.style.top = (e.clientY - rect.top - size / 2) + 'px';
+    target.appendChild(span);
+    span.addEventListener('animationend', function () { span.remove(); });
+  });
+}
+
+// 画面淡入淡出转场：hideEl 淡出后才把 display 设为 none，showEl 同时淡入
+function fadeSwitchScreen(hideEl, showEl, showDisplay) {
+  if (hideEl) {
+    hideEl.classList.add('screen-fade-out');
+    setTimeout(function () {
+      hideEl.style.display = 'none';
+      hideEl.classList.remove('screen-fade-out');
+    }, 180);
+  }
+  if (showEl) {
+    showEl.style.display = showDisplay || 'block';
+    showEl.classList.remove('screen-fade-out');
+    showEl.classList.add('screen-fade-in');
+    setTimeout(function () { showEl.classList.remove('screen-fade-in'); }, 320);
+  }
+}
+
+// ============================================================
+//  开机启动序列 Boot Sequence
+// ============================================================
+//  网页第一次载入时播放的终端机风格开机动画，纯粹视觉效果，
+//  跑完 (或使用者点击跳过) 就会呼叫 callback 继续正常流程 (登入检查)。
+// ============================================================
+const BOOT_STEPS = [
+  'INITIALIZING SYSTEM',
+  'LOADING CONTAINER MODULES',
+  'CONNECTING TO DATABASE',
+  'VERIFYING SESSION',
+  'READY',
+];
+
+function runBootSequence(callback) {
+  const overlay = document.getElementById('bootSequence');
+  const linesEl = document.getElementById('bootLines');
+  const fillEl = document.getElementById('bootProgressFill');
+  const pctEl = document.getElementById('bootPercent');
+  if (!overlay || !linesEl) { if (callback) callback(); return; }
+
+  const reducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (reducedMotion) { if (callback) callback(); return; } // 使用者要求减少动态效果，直接跳过开机动画
+
+  let triggered = false;
+  function finish() {
+    if (triggered) return;
+    triggered = true;
+    // 注意: 这里刻意不隐藏 overlay —— 开机动画播完后先呼叫 callback (通常是登入状态检查)，
+    // 等确定要显示登入画面还是主画面之后，由 hideBootOverlay() 统一淡出，避免已登入的
+    // 使用者在开机动画结束瞬间闪过一下登入画面才又切到主画面。
+    if (callback) callback();
+  }
+
+  overlay.addEventListener('click', finish, { once: true }); // 点击可跳过动画 (仍会等待 callback 决定画面)
+
+  const stepDelay = 260;
+  BOOT_STEPS.forEach(function (label, i) {
+    setTimeout(function () {
+      if (triggered) return;
+      const line = document.createElement('span');
+      line.className = 'boot-line';
+      line.textContent = label;
+      linesEl.appendChild(line);
+      const pct = Math.round(((i + 1) / BOOT_STEPS.length) * 100);
+      if (fillEl) fillEl.style.width = pct + '%';
+      if (pctEl) pctEl.textContent = pct + '%';
+      setTimeout(function () { line.classList.add('done'); }, 160);
+    }, i * stepDelay);
+  });
+
+  setTimeout(finish, BOOT_STEPS.length * stepDelay + 380);
+}
+
+// 淡出开机遮罩，由 showAuthScreen() / showMainApp() 呼叫，确保画面内容已经准备好才淡出
+function hideBootOverlay() {
+  const overlay = document.getElementById('bootSequence');
+  if (!overlay || overlay.classList.contains('boot-done')) return;
+  overlay.classList.add('boot-done');
+  setTimeout(function () { overlay.style.display = 'none'; }, 520);
+}
+
+// ============================================================
+//  状态转场闪示 Status Flash Overlay (登入成功 / 登出等瞬间提示)
+// ============================================================
+function showStatusFlash(opts) {
+  const overlay = document.getElementById('statusFlashOverlay');
+  if (!overlay) { if (opts.callback) opts.callback(); return; }
+  document.getElementById('statusFlashIcon').textContent = opts.icon || '✓';
+  document.getElementById('statusFlashText').textContent = opts.text || '';
+  overlay.classList.toggle('error', !!opts.error);
+  overlay.classList.add('show');
+  setTimeout(function () {
+    overlay.classList.remove('show');
+    if (opts.callback) opts.callback();
+  }, opts.duration || 700);
+}
+
+// ============================================================
+//  货柜切换扫描过场 Detail Panel Scan Transition
+// ============================================================
+function playScanSweep(containerEl) {
+  if (!containerEl) return;
+  const sweep = document.createElement('div');
+  sweep.className = 'detail-scan-sweep';
+  containerEl.appendChild(sweep);
+  setTimeout(function () { sweep.remove(); }, 600);
+}
+
+window.addEventListener('DOMContentLoaded', function () {
+  attachRippleEffect();
+});
+</script>

@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <?!= include('Stylesheet'); ?>
+</head>
+<body>
+
+  <!-- ============ 开机启动序列 Boot Sequence ============ -->
+  <div id="bootSequence" class="boot-sequence">
+    <div class="boot-inner">
+      <div class="boot-logo">
+        <span class="crate-icon"></span>
+        <div class="boot-logo-ring"></div>
+      </div>
+      <div class="boot-lines" id="bootLines"></div>
+      <div class="boot-progress-track"><div class="boot-progress-fill" id="bootProgressFill"></div></div>
+      <div class="boot-percent" id="bootPercent">0%</div>
+    </div>
+  </div>
+
+  <!-- ============ 登入 / 注册 Auth Screen ============ -->
+  <div id="authScreen" class="auth-screen">
+    <div class="auth-box">
+      <div class="auth-logo"><span class="crate-icon"></span></div>
+      <h1 class="auth-title">集装箱装载计算器</h1>
+      <div class="auth-subtitle">CONTAINER LOADING CALCULATOR</div>
+
+      <div id="authError" class="auth-error" style="display:none;"></div>
+      <div id="authInfo" class="auth-info" style="display:none;"></div>
+
+      <!-- 登入表单 -->
+      <div id="loginForm">
+        <div class="field"><label>邮箱 Email</label><input type="email" id="loginEmail" autocomplete="username"></div>
+        <div class="field"><label>密码 Password</label><input type="password" id="loginPassword" autocomplete="current-password"></div>
+        <button class="btn btn-calc" id="loginBtn" style="width:100%;">登入 Log In</button>
+        <div class="auth-switch">还没有帐号？ <a href="#" id="showRegisterLink">注册新帐号 Register</a> · <a href="#" id="showForgotLink">忘记密码 Forgot password?</a></div>
+      </div>
+
+      <!-- 忘记密码表单 -->
+      <div id="forgotForm" style="display:none;">
+        <div class="field"><label>邮箱 Email</label><input type="email" id="forgotEmail" autocomplete="username"></div>
+        <button class="btn btn-ghost" id="forgotSendBtn" style="width:100%; margin-bottom:12px;">寄送验证码 Send Code</button>
+        <div class="field"><label>验证码 Code <span class="hint-inline">(6 位数 6 digits)</span></label><input type="text" id="forgotCode" inputmode="numeric" maxlength="6" autocomplete="one-time-code"></div>
+        <div class="field"><label>新密码 New Password <span class="hint-inline">(至少6个字元 min 6 chars)</span></label><input type="password" id="forgotNewPw" autocomplete="new-password"></div>
+        <button class="btn btn-calc" id="forgotResetBtn" style="width:100%;">重设密码 Reset Password</button>
+        <div class="auth-switch"><a href="#" id="forgotBackLink">返回登入 Back to Log In</a></div>
+      </div>
+
+      <!-- 注册表单 -->
+      <div id="registerForm" style="display:none;">
+        <div class="field"><label>邮箱 Email</label><input type="email" id="regEmail" autocomplete="username"></div>
+        <div class="field"><label>密码 Password <span class="hint-inline">(至少6个字元 min 6 chars)</span></label><input type="password" id="regPassword" autocomplete="new-password"></div>
+        <div class="field"><label>公司名称 Company Name <span class="hint-inline">(选填，稍后也可修改 optional)</span></label><input type="text" id="regCompanyName"></div>
+        <div class="field"><label>公司地址 Company Address <span class="hint-inline">(选填 optional)</span></label><input type="text" id="regCompanyAddress"></div>
+        <button class="btn btn-calc" id="registerBtn" style="width:100%;">注册 Register</button>
+        <div class="auth-switch">已经有帐号？ <a href="#" id="showLoginLink">返回登入 Back to Log In</a></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 状态转场闪示 Status Flash Overlay (登入成功 / 登出用) -->
+  <div class="status-flash-overlay" id="statusFlashOverlay">
+    <div class="status-flash-box">
+      <div class="status-flash-ring"><span class="status-flash-icon" id="statusFlashIcon">✓</span></div>
+      <div class="status-flash-text" id="statusFlashText">ACCESS GRANTED</div>
+    </div>
+  </div>
+
+  <!-- ============ 主程式 Main App (登入后显示) ============ -->
+  <div id="mainApp" style="display:none;">
+
+    <div class="topbar">
+      <div class="topbar-inner">
+        <div>
+          <h1><span class="crate-icon"></span>集装箱装载计算器 CONTAINER LOADING CALCULATOR</h1>
+          <div class="subtitle">EXPORT PACKING PLANNER · CBM &amp; PAYLOAD OPTIMIZER</div>
+        </div>
+        <div class="topbar-user no-print">
+          <span class="user-email" id="topbarUserEmail"></span>
+          <button class="user-menu-btn" id="myProfileBtn">👤 我的资料 Profile</button>
+          <button class="user-menu-btn" id="adminDashBtn" style="display:none;">🛡 管理后台 Admin</button>
+          <button class="user-menu-btn" id="logoutBtn">登出 Logout</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="wrap">
+
+      <div class="steps no-print">
+        <div class="step-tab active"><span class="num">1</span>货运信息 Shipment Info</div>
+        <div class="step-tab active"><span class="num">2</span>物品清单 Items</div>
+        <div class="step-tab active"><span class="num">3</span>集装箱设置 Containers</div>
+        <div class="step-tab active"><span class="num">4</span>计算结果 Results</div>
+      </div>
+
+      <!-- ⓪ 货运信息 (会显示在导出的 PDF 表头) -->
+      <div class="card no-print">
+        <div class="card-title">
+          <span>货运信息 Shipment Info</span>
+          <span class="hint">这些资料会显示在导出的 PDF 报告表头 — Shown in the PDF report header</span>
+        </div>
+        <div class="shipment-grid">
+          <div class="field"><label>客户 Customer</label><input type="text" id="shipCustomer"></div>
+          <div class="field"><label>预计出发日 ETD</label><input type="date" id="shipETD"></div>
+          <div class="field"><label>预计到达日 ETA</label><input type="date" id="shipETA"></div>
+          <div class="field"><label>船公司 Shipping Line</label><input type="text" id="shipLine"></div>
+          <div class="field field-wide"><label>备注 Remark</label><input type="text" id="shipRemark"></div>
+        </div>
+        <div class="shipment-grid" style="margin-top:4px;">
+          <div class="field"><label>绘图 Drawn</label><input type="text" id="shipDrawn"></div>
+          <div class="field"><label>检查 Checked</label><input type="text" id="shipChecked"></div>
+          <div class="field"><label>确认 Confirmed</label><input type="text" id="shipConfirmed"></div>
+        </div>
+        <div class="accessory-section">
+          <div class="card-title" style="margin-bottom:8px;"><span>配件清单 Accessories</span></div>
+          <table class="item-table" id="accessoryTable">
+            <thead><tr><th>配件名称 Accessory Name</th><th class="col-narrow">数量 Qty</th><th class="col-del"></th></tr></thead>
+            <tbody id="accessoryTableBody"></tbody>
+          </table>
+          <button class="btn-add" id="addAccessoryBtn" style="margin-top:8px;">+ 添加配件 Add Accessory</button>
+        </div>
+      </div>
+
+      <!-- ① 物品清单 -->
+      <div class="card no-print">
+        <div class="card-title">
+          <span>① 物品清单 Item List</span>
+          <span class="hint">输入总数量与每箱数量，系统自动换算箱数 — Enter total PCS &amp; PCS/box, boxes are auto-calculated</span>
+        </div>
+        <table class="item-table">
+          <thead>
+            <tr>
+              <th class="col-color"></th>
+              <th>物品名称 Item Name</th>
+              <th class="col-narrow">总数量 PCS</th>
+              <th class="col-narrow">每箱 PCS/Box</th>
+              <th class="col-narrow">长 L (cm)</th>
+              <th class="col-narrow">宽 W (cm)</th>
+              <th class="col-narrow">高 H (cm)</th>
+              <th class="col-narrow">每箱重量 KG/Box(选填)</th>
+              <th class="col-narrow">箱数</th>
+              <th class="col-del"></th>
+            </tr>
+          </thead>
+          <tbody id="itemsTableBody"></tbody>
+        </table>
+        <div style="margin-top:10px;">
+          <button class="btn-add" id="addItemBtn">+ 添加物品 Add Item</button>
+        </div>
+      </div>
+
+      <!-- ② 集装箱设置 -->
+      <div class="card no-print">
+        <div class="card-title">
+          <span>② 集装箱尺寸设置 Container Presets</span>
+          <span class="hint">勾选本次计算允许使用的柜型 · 尺寸存于 Google Sheet 可自行编辑 — stored in Google Sheet, fully editable</span>
+        </div>
+        <div class="preset-grid" id="presetGrid"></div>
+      </div>
+
+      <div class="no-print" style="margin: 4px 0 24px;">
+        <button class="btn-calc" id="calcBtn">⚙ 计算装载方案 Calculate Loading Plan</button>
+        <button class="btn btn-ghost" id="historyBtn" style="margin-left:10px;">📂 历史记录 History</button>
+      </div>
+
+      <div class="hazard-divider no-print"></div>
+
+      <!-- ③ 结果 -->
+      <div id="resultsSection">
+        <div class="empty-state">
+          <div class="crate-big">📦</div>
+          尚无结果，请先完成物品与柜型设定后按下计算按钮<br>
+          No results yet — fill in items and containers above, then calculate.
+        </div>
+      </div>
+
+    </div>
+
+    <!-- 历史记录 Modal -->
+    <div class="modal-overlay no-print" id="historyModal">
+      <div class="modal-box" style="width:640px;">
+        <h3>历史记录 Calculation History</h3>
+        <div id="historyList" class="history-list">加载中 Loading...</div>
+        <div class="modal-actions"><button class="btn btn-ghost" id="historyClose">关闭 Close</button></div>
+      </div>
+    </div>
+
+    <!-- 柜型新增/编辑 Modal -->
+    <div class="modal-overlay no-print" id="containerModal">
+      <div class="modal-box">
+        <h3 id="containerModalTitle">新增自定义柜型 Add Custom Container</h3>
+        <div class="field"><label>柜型名称 Container Name</label><input type="text" id="cModalName" placeholder="例如: 20呎冷柜 20ft Reefer"></div>
+        <div class="field"><label>内部长度 Length (cm)</label><input type="number" id="cModalL"></div>
+        <div class="field"><label>内部宽度 Width (cm)</label><input type="number" id="cModalW"></div>
+        <div class="field"><label>内部高度 Height (cm)</label><input type="number" id="cModalH"></div>
+        <div class="field"><label>最大载重 Max Payload (kg)</label><input type="number" id="cModalPayload"></div>
+        <div class="modal-actions">
+          <button class="btn btn-ghost" id="cModalCancel">取消 Cancel</button>
+          <button class="btn btn-primary" id="cModalSave">保存 Save</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ============ 我的资料 My Profile (全萤幕) ============ -->
+  <div id="profileScreen" class="fullscreen-panel no-print" style="display:none;">
+    <div class="fullscreen-panel-inner">
+      <button class="back-link" id="profileBackBtn">‹ 返回 Back</button>
+      <h2 class="stencil">我的资料 My Profile</h2>
+      <div class="card">
+        <div class="field"><label>邮箱 Email</label><input type="email" id="profileEmail" disabled></div>
+        <div class="field"><label>公司名称 Company Name</label><input type="text" id="profileCompanyName"></div>
+        <div class="field"><label>公司地址 Company Address</label><input type="text" id="profileCompanyAddress"></div>
+        <div class="field">
+          <label>公司标志 Company Logo <span class="hint-inline">(会显示在 PDF 表头，建议使用透明底 PNG shown in PDF header)</span></label>
+          <input type="file" id="profileLogoInput" accept="image/*">
+          <div class="logo-preview-wrap"><img id="profileLogoPreview" class="logo-preview" style="display:none;"><button class="icon-btn" id="profileLogoRemove" style="display:none;">✕</button></div>
+        </div>
+        <button class="btn btn-primary" id="profileSaveBtn">保存 Save</button>
+      </div>
+      <div class="card">
+        <div class="card-title"><span>修改密码 Change Password</span></div>
+        <div class="field"><label>目前密码 Current Password</label><input type="password" id="profileOldPassword"></div>
+        <div class="field"><label>新密码 New Password</label><input type="password" id="profileNewPassword"></div>
+        <button class="btn btn-ghost" id="profileChangePwBtn">修改密码 Change Password</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 管理后台 Admin Dashboard (全萤幕) ============ -->
+  <div id="adminScreen" class="fullscreen-panel no-print" style="display:none;">
+    <div class="fullscreen-panel-inner">
+      <button class="back-link" id="adminBackBtn">‹ 返回 Back</button>
+      <h2 class="stencil">🛡 管理后台 Admin Dashboard</h2>
+      <div class="card-title" style="margin-bottom:10px;"><span class="hint">共 <span id="adminUserCount">0</span> 个帐号 — 可编辑任何人的资料、权限与启用状态</span></div>
+      <div id="adminUserList"></div>
+    </div>
+  </div>
+
+  <!-- 帐号编辑 Modal (Admin 用) -->
+  <div class="modal-overlay no-print" id="userEditModal">
+    <div class="modal-box">
+      <h3>编辑帐号 Edit Account</h3>
+      <div class="field"><label>邮箱 Email</label><input type="email" id="uModalEmail" disabled></div>
+      <div class="field"><label>公司名称 Company Name</label><input type="text" id="uModalCompanyName"></div>
+      <div class="field"><label>公司地址 Company Address</label><input type="text" id="uModalCompanyAddress"></div>
+      <div class="field"><label>角色 Role</label>
+        <select id="uModalRole"><option value="user">User</option><option value="admin">Admin</option></select>
+      </div>
+      <div class="field"><label>状态 Status</label>
+        <select id="uModalStatus"><option value="active">Active</option><option value="inactive">Inactive</option></select>
+      </div>
+      <div class="field"><label>重设密码 Reset Password <span class="hint-inline">(留空则不变更 leave blank to keep unchanged)</span></label><input type="password" id="uModalNewPassword"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="uModalCancel">取消 Cancel</button>
+        <button class="btn btn-primary" id="uModalSave">保存 Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 装箱动画 Packing Animation Overlay -->
+  <div class="pack-anim-overlay no-print" id="packAnimOverlay">
+    <div class="pack-anim-box">
+      <div class="pack-anim-title">📦 正在装箱 Loading Containers...</div>
+      <canvas id="packAnimCanvas" width="680" height="280"></canvas>
+      <button class="pack-anim-skip" id="packAnimSkip">跳过动画 Skip ›</button>
+    </div>
+  </div>
+
+  <!-- ============ CDN 依赖库 ============ -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js" integrity="sha384-CI3ELBVUz9XQO+97x6nwMDPosPR5XvsxW2ua7N1Xeygeh1IxtgqtCkGfQY9WWdHu" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js" integrity="sha384-wagZhIFgY4hD+7awjQjR4e2E294y6J2HSnd8eTNc15ZubTeQeVRZwhQJ+W6hnBsf" crossorigin="anonymous"></script>
+  <!-- 版本固定 (不用 @2 / @3 浮动版本), 避免 CDN 上的新版本悄悄改变 PDF 版面或带来风险 -->
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js" integrity="sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js" integrity="sha384-fCAW/rDWORTbQXSiB7mOg0QtQ5c+r0f544y6XoKjuVva0nMBlCpNUjiFeG5iMdS3" crossorigin="anonymous"></script>
+
+  <?!= include('Auth'); ?>
+  <?!= include('Effects'); ?>
+  <?!= include('JavaScript'); ?>
+  <?!= include('Render'); ?>
+  <?!= include('Viewer3D'); ?>
+  <?!= include('Export'); ?>
+
+</body>
+</html>

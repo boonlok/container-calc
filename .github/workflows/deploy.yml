@@ -1,0 +1,54 @@
+# 每次推送到 main: 跑测试 → 建置 Flutter Web → 发布到 GitHub Pages
+# 连接 Supabase: 在仓库 Settings → Secrets and variables → Actions → Variables 新增
+#   SUPABASE_URL 与 SUPABASE_ANON_KEY (anon key 本来就是公开用的, 数据靠 RLS 保护)。
+#   没设置时 App 以「演示模式」运行, 资料不会保存。
+name: Deploy Flutter Web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flutter_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+      - name: Build web
+        run: >
+          flutter build web --release --no-web-resources-cdn
+          --base-href /${{ github.event.repository.name }}/
+          --dart-define=SUPABASE_URL=${{ vars.SUPABASE_URL }}
+          --dart-define=SUPABASE_ANON_KEY=${{ vars.SUPABASE_ANON_KEY }}
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: flutter_app/build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
