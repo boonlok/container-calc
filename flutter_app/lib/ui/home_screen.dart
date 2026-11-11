@@ -10,6 +10,7 @@ import '../state/app_state.dart';
 import 'admin_screen.dart';
 import 'dialogs.dart';
 import 'import_dialog.dart';
+import 'library_dialog.dart';
 import 'profile_screen.dart';
 import 'results_view.dart';
 import 'theme.dart';
@@ -219,6 +220,7 @@ class _ItemsCard extends StatelessWidget {
       title: '物品清单 Item List',
       hint: '输入总数量与每箱数量，系统自动换算箱数 — Enter total PCS & PCS/box, boxes are auto-calculated',
       trailing: Wrap(spacing: 4, children: [
+        TextButton.icon(key: const ValueKey('openLibrary'), onPressed: () => showLibraryDialog(context, state), icon: const Icon(Icons.bookmarks_outlined, size: 16, color: orangeDark), label: const Text('常用物品 Library', style: TextStyle(color: orangeDark, fontSize: 12))),
         TextButton.icon(key: const ValueKey('importList'), onPressed: () => showImportDialog(context, state), icon: const Icon(Icons.content_paste, size: 16, color: orangeDark), label: const Text('从 Excel 汇入 Import', style: TextStyle(color: orangeDark, fontSize: 12))),
         TextButton.icon(key: const ValueKey('loadSample'), onPressed: state.loadSample, icon: const Icon(Icons.auto_awesome, size: 16, color: orangeDark), label: const Text('试用示例 Try Sample', style: TextStyle(color: orangeDark, fontSize: 12))),
       ]),

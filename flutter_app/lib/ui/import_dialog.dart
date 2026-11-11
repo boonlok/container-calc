@@ -6,6 +6,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 import '../core/import_list.dart';
+import '../core/xlsx_reader.dart';
 import '../render/notes.dart' show fmt;
 import '../services/download.dart';
 import '../state/app_state.dart';
@@ -32,8 +33,21 @@ class _ImportDialogState extends State<_ImportDialog> {
   Future<void> _pickFile() async {
     final bytes = await pickTextFile();
     if (bytes == null) return;
-    var s = utf8.decode(bytes, allowMalformed: true);
-    if (s.startsWith('﻿')) s = s.substring(1); // Excel 存的 CSV 常带 BOM
+    String s;
+    if (looksLikeXlsx(bytes)) {
+      try {
+        s = xlsxToTsv(bytes);
+      } on FormatException catch (e) {
+        widget.state.toast(e.message, error: true);
+        return;
+      }
+    } else if (bytes.length > 8 && bytes[0] == 0xD0 && bytes[1] == 0xCF) {
+      widget.state.toast('这是旧版 .xls 档案，请在 Excel 另存为 .xlsx 或 CSV 再选 Old .xls format, please save as .xlsx or CSV', error: true);
+      return;
+    } else {
+      s = utf8.decode(bytes, allowMalformed: true);
+      if (s.startsWith('﻿')) s = s.substring(1); // Excel 存的 CSV 常带 BOM
+    }
     text.text = s;
     _parse();
   }
@@ -69,7 +83,7 @@ class _ImportDialogState extends State<_ImportDialog> {
             ),
             const SizedBox(height: 8),
             Wrap(spacing: 12, runSpacing: 6, crossAxisAlignment: WrapCrossAlignment.center, children: [
-              OutlinedButton.icon(onPressed: _pickFile, icon: const Icon(Icons.upload_file, size: 16), label: const Text('选 CSV 档案 Choose CSV')),
+              OutlinedButton.icon(onPressed: _pickFile, icon: const Icon(Icons.upload_file, size: 16), label: const Text('选 Excel / CSV 档案 Choose File')),
               const Text('尺寸单位 Unit:', style: TextStyle(fontSize: 12.5)),
               SegmentedButton<bool>(
                 key: const ValueKey('importUnit'),

@@ -61,7 +61,7 @@ Future<Uint8List?> pickTextFile() {
   final done = Completer<Uint8List?>();
   final input = web.HTMLInputElement()
     ..type = 'file'
-    ..accept = '.csv,.txt,.tsv,text/csv,text/plain';
+    ..accept = '.xlsx,.csv,.txt,.tsv,text/csv,text/plain,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
   input.onchange = ((web.Event _) {
     final file = input.files?.item(0);
     if (file == null) {
